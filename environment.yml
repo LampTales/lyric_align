@@ -1,0 +1,11 @@
+name: lyric
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - pykakasi==2.3.0
+      - sudachipy==0.6.11
+      - sudachidict_core==20260723
+      - pyopenjtalk==0.4.1
