@@ -47,3 +47,12 @@ python -m pip install pykakasi
 ```
 
 后续再单独加入 Sudachi/UniDic、Demucs 和 CTC 强制对齐，避免把大模型依赖和数据格式验证混在第一步。
+
+## 比较日语 G2P 后端
+
+```bash
+conda activate lyric
+python compare_g2p.py
+```
+
+报告地址为 <http://10.10.10.20:8765/results/g2p/>。绿色代表三套读音一致，黄色代表两套一致，红色代表三套都不同；分歧报告用于挑选需要人工验证的歌词，并不自动把多数结果当成真值。
