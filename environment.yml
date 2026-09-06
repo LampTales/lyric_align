@@ -9,3 +9,6 @@ dependencies:
       - sudachipy==0.6.11
       - sudachidict_core==20260723
       - pyopenjtalk==0.4.1
+      - demucs==4.1.0
+      - transformers==5.16.1
+      - torchaudio==2.11.0

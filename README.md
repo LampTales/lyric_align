@@ -8,6 +8,12 @@
 
 模型权重和声学中间文件统一放在当前目录的 `models/` 或 `artifacts/`，这两个目录已加入 `.gitignore`，不会进入 Git 提交。
 
+Demucs 使用本地模型缓存时设置：
+
+```bash
+export HF_HOME="$PWD/models/huggingface"
+```
+
 ## 运行无依赖基线
 
 ```bash
@@ -56,3 +62,74 @@ python compare_g2p.py
 ```
 
 报告地址为 <http://10.10.10.20:8765/results/g2p/>。绿色代表三套读音一致，黄色代表两套一致，红色代表三套都不同；分歧报告用于挑选需要人工验证的歌词，并不自动把多数结果当成真值。
+
+候选读音决策和对齐输入可用：
+
+```bash
+python prepare_reading.py
+```
+
+报告地址为 <http://10.10.10.20:8765/results/reading/>。三方冲突行默认采用 Sudachi 结果，但标记为 `low/manual_review`，不会被视为最终真值。
+
+生产式流程不要求运行三个后端，可以显式选择一个：
+
+```bash
+python prepare_reading.py --backend openjtalk
+# 或 --backend sudachi / --backend pykakasi
+```
+
+单后端结果标记为 `single_backend`，会自动继续生成，不会阻塞手机端使用；`consensus` 仅用于离线比较和发现潜在歧义。
+
+## 句内活动窗口基线
+
+```bash
+python activity_baseline.py
+```
+
+结果在 `results/activity/`。它使用 FFmpeg + NumPy 的短时能量，只修剪句级锚点内明显的低能量边界；伴奏也会产生能量，因此这不是人声检测，所有调整都带有 warning，供后续人声分离/CTC 对比。
+
+可视化对比页面：<http://10.10.10.20:8765/results/activity/>。灰色为原句级窗口，绿色为能量分析后窗口。
+
+Demucs 分离后，可以比较原混音与人声 stem 的活动窗口：
+
+```bash
+python compare_vocal_activity.py samples/1851578144_東京事変_孔雀 \
+  artifacts/demucs_local/htdemucs/audio/vocals.wav
+```
+
+页面：<http://10.10.10.20:8765/results/vocal_activity/>。
+
+## CTC 对齐探针
+
+Demucs 人声 stem 准备好后，可以对一首歌的前几句运行 CTC 探针：
+
+```bash
+export HF_HOME="$PWD/models/huggingface"
+python ctc_align.py --max-lines 5
+```
+
+结果写入 `results/ctc_probe.json`。该脚本只用于判断日语 wav2vec2 在歌声上的字符后验是否有用，尚未接入视频渲染，也不会自动替换现有时间轴。
+
+本次 `孔雀` 前五句的浏览器检查页：<http://10.10.10.20:8765/results/ctc_probe.html>。
+
+简单歌曲 `羊文学／なつのせいです` 的前八句：
+
+```bash
+python ctc_align.py --song 'samples/1867888452_羊文学_なつのせいです' \
+  --vocals artifacts/demucs_natsu/htdemucs/audio/vocals.wav \
+  --reading 'results/reading_natsu/1867888452_羊文学_なつのせいです.json' \
+  --max-lines 8 --out results/ctc_natsu.json
+python ctc_mora.py --input results/ctc_natsu.json --out results/ctc_natsu_mora.json
+```
+
+检查页：<http://10.10.10.20:8765/results/ctc_natsu.html>。这八句均通过当前质量门控；这只说明模型在简单样本上能形成连续字符路径，仍需与人工/更可靠标注对照。
+
+完整 36 行的探针结果位于 `results/ctc_natsu_all.json`，浏览器检查页为 <http://10.10.10.20:8765/results/ctc_natsu_all.html>；mora 聚合结果为 `results/ctc_natsu_all_mora.json`。
+
+将 CTC 字符时间聚合到 mora，并启用自动质量门控/回退：
+
+```bash
+python ctc_mora.py
+```
+
+`results/ctc_mora.json` 中 `alignment_status=ctc` 表示通过质量门控；低分、缺失字符或路径异常会自动使用句级插值，并记录 warning，不需要终端用户人工修正。
