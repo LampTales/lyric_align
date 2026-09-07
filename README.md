@@ -1,5 +1,7 @@
 # lyric_align 实验目录
 
+输入/输出契约、时间语义、回退策略和生产接入边界见 [PIPELINE.md](/Users/lamptales/remote/cloudmusic2ktv/lyric_align/PIPELINE.md)。
+
 `samples/` 是从原项目 `local/outputs/` 复制的长期回归样本，不会随原仓库变化。
 
 样本目录仅用于本机长期回归，整个 `samples/` 已加入 `.gitignore`，不会进入 Git 提交。若要在另一台机器复现实验，需要另外准备这些样本文件。
@@ -133,3 +135,10 @@ python ctc_mora.py
 ```
 
 `results/ctc_mora.json` 中 `alignment_status=ctc` 表示通过质量门控；低分、缺失字符或路径异常会自动使用句级插值，并记录 warning，不需要终端用户人工修正。
+
+提交前可验证样本输入和细粒度产物：
+
+```bash
+python validate_artifacts.py \
+  --artifact results/ctc_natsu_all_mora.json
+```
