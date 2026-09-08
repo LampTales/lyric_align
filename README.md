@@ -1,5 +1,45 @@
 # lyric_align 实验目录
 
+完整的独立库输入/输出契约见 [LIBRARY.md](/Users/lamptales/remote/cloudmusic2ktv/lyric_align/LIBRARY.md)。
+
+## Python library
+
+The repository contains an installable package under `src/lyric_align`.
+It is deliberately usable outside the KTV project: model and dictionary paths
+are independent parameters, and no model weights are included in the package.
+
+```bash
+pip install -e .
+pip install -e '.[japanese]'
+```
+
+The public input contract is a song directory containing `metadata.json`,
+`lyrics_timeline.json`, and one `audio.*` file. The first package release
+provides the deterministic reading/mora baseline and its versioned
+`alignment.json` output; optional Demucs and CTC adapters populate the same
+schema without changing callers. Heavy stages are opt-in.
+
+```python
+from lyric_align import AlignmentConfig, ModelPaths, prepare_song
+
+result = prepare_song(
+    "/data/song",
+    stages=("reading", "demucs", "ctc"),
+    config=AlignmentConfig(
+        g2p_backend="openjtalk",
+        models=ModelPaths(
+            demucs_model_path="/models/demucs/htdemucs",
+            ctc_model_path="/models/wav2vec2-japanese",
+            g2p_dictionary_path="/models/sudachi",
+        ),
+    ),
+)
+```
+
+The separate fields are intentional: a future backend can add another model
+path without forcing users to merge unrelated model directories. FFmpeg is a
+system executable (`ffmpeg_path`), not a Python or model dependency.
+
 输入/输出契约、时间语义、回退策略和生产接入边界见 [PIPELINE.md](/Users/lamptales/remote/cloudmusic2ktv/lyric_align/PIPELINE.md)。
 
 `samples/` 是从原项目 `local/outputs/` 复制的长期回归样本，不会随原仓库变化。

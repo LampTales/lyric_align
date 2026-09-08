@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lyric-align"
+version = "0.1.0"
+description = "Model-assisted lyric reading and singing-time alignment"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+japanese = ["pykakasi>=2.3", "sudachipy>=0.6", "sudachidict-core"]
+ctc = ["torch", "torchaudio", "transformers"]
+demucs = ["demucs>=4.0"]
+all = [
+  "pykakasi>=2.3",
+  "sudachipy>=0.6",
+  "sudachidict-core",
+  "torch",
+  "torchaudio",
+  "transformers",
+  "demucs>=4.0",
+]
+
+[project.scripts]
+lyric-align = "lyric_align.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
