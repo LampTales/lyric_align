@@ -8,6 +8,8 @@ from typing import Any
 
 
 SCHEMA_VERSION = 1
+_LINE_STATUSES = {"non_sung", "unresolved", "interpolation", "ctc", "fallback"}
+_ALIGNMENT_STATUSES = {"ctc", "fallback", "activity", "interpolation", "unresolved", None}
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,14 @@ class AlignmentLine:
     def validate(self) -> None:
         if self.start_ms < 0 or self.end_ms < self.start_ms:
             raise ValueError("line times must satisfy 0 <= start_ms <= end_ms")
+        if self.status not in _LINE_STATUSES:
+            raise ValueError(f"unsupported line status: {self.status}")
+        if self.alignment_status not in _ALIGNMENT_STATUSES:
+            raise ValueError(f"unsupported alignment status: {self.alignment_status}")
+        if self.coverage is not None and not 0.0 <= float(self.coverage) <= 1.0:
+            raise ValueError("coverage must be between 0 and 1")
+        if self.confidence is not None and not 0.0 <= float(self.confidence) <= 1.0:
+            raise ValueError("confidence must be between 0 and 1")
         previous = self.start_ms
         for item in self.mora:
             start, end = int(item["start_ms"]), int(item["end_ms"])

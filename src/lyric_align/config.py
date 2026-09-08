@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 
 
@@ -82,6 +83,8 @@ class AlignmentConfig:
             raise ValueError("offset_step_ms must be positive")
         if self.ctc_margin_ms < 0:
             raise ValueError("ctc_margin_ms must not be negative")
+        if not math.isfinite(float(self.ctc_score_threshold)):
+            raise ValueError("ctc_score_threshold must be finite")
         for name in ("vocals_format", "instrumental_format"):
             if getattr(self, name) not in {"mp3", "flac", "wav"}:
                 raise ValueError(f"{name} must be mp3, flac, or wav")

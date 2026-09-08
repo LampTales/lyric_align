@@ -91,7 +91,7 @@ python prepare_reading.py --backend openjtalk --out results/reading_openjtalk
 "timing": {"original_start_ms": 33330, "global_offset_ms": -420, "start_ms": 32910}
 ```
 
-只有当最佳候选明显优于 0 ms 且具有稳定峰值时才自动应用；否则保留 `global_offset_ms=0` 并标记 `offset_uncertain`。
+只有当最佳候选明显优于 0 ms 且具有稳定峰值时才自动应用；否则保留 `global_offset_ms=0` 并标记 `offset_status="uncertain"`。
 
 `apply_offset.py` 可把候选偏移写入独立的修正时间轴，永远不覆盖 `lyrics_timeline.json`：
 

@@ -56,6 +56,12 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual(config.models.as_dict()["ctc_model_path"], "/b")
         self.assertEqual(config.instrumental_format, "mp3")
 
+    def test_control_parameter_validation(self):
+        with self.assertRaises(ValueError):
+            AlignmentConfig(ctc_score_threshold=float("nan"))
+        with self.assertRaises(ValueError):
+            AlignmentConfig(offset_step_ms=0)
+
     def test_surface_spans_keep_ambiguous_runs_as_low_confidence(self):
         spans = build_surface_spans("夏のせい", "なつのせい")
         self.assertTrue(spans)

@@ -35,6 +35,22 @@ The package never assumes that these paths share a parent directory and never
 downloads weights as a side effect of serialization. FFmpeg is configured as
 an executable path separately (`AlignmentConfig.ffmpeg_path`).
 
+All per-song policy knobs are available through `AlignmentConfig`; callers do
+not need to modify internal modules. The main controls are:
+
+| Area | Parameters |
+| --- | --- |
+| text | `g2p_backend`, `g2p_dictionary_path` |
+| execution | `device`, `ffmpeg_path`, `sample_rate` |
+| Demucs/output | `demucs_model_name`, `keep_vocals`, `keep_instrumental`, `vocals_format`, `instrumental_format`, `vocals_bitrate`, `instrumental_bitrate` |
+| offset | `enable_offset`, `offset_low_ms`, `offset_high_ms`, `offset_step_ms` |
+| CTC | `ctc_margin_ms`, `ctc_score_threshold` |
+
+`ModelPaths` keeps model resources independent, including the reserved
+`whisper_model_path`. Model lifetime is intentionally not managed by this
+library: a service can keep a model/worker resident and pass the same config
+to multiple jobs, while a one-shot CLI invocation remains self-contained.
+
 ## Stages and output
 
 ```python

@@ -40,6 +40,22 @@ The separate fields are intentional: a future backend can add another model
 path without forcing users to merge unrelated model directories. FFmpeg is a
 system executable (`ffmpeg_path`), not a Python or model dependency.
 
+The CLI exposes the same controls as the Python API. For example, search and
+quality thresholds can be adjusted without editing code:
+
+```bash
+python -m lyric_align.cli prepare --song-dir samples/<song> \
+  --stages reading demucs ctc \
+  --demucs-model-path /models/demucs \
+  --ctc-model-path /models/ctc \
+  --ctc-margin-ms 700 --ctc-score-threshold -1.8 \
+  --offset-low-ms -1500 --offset-high-ms 1500 --offset-step-ms 40 \
+  --instrumental-bitrate 320k
+```
+
+In a long-running KTV worker, model objects may be loaded once and reused by
+the caller; `prepare_song()` itself does not impose a model-lifetime policy.
+
 For a compact persistent output, the default Demucs policy keeps only an
 `instrumental.mp3` at 320 kbps; the vocal stem is temporary unless
 `keep_vocals=True`. Re-running preparation reuses a matching alignment or
