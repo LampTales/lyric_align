@@ -45,6 +45,7 @@ lyric_align/
 - mora/字符区间应当落在其所属句的搜索窗口内，允许为模型 margin 留出窗口外帧，但最终投影必须裁剪回歌曲时间轴；
 - 空行、纯标点和元数据行不参与声学对齐；原文仍可在诊断报告中保留；
 - 原文显示文本永远不被 reading 覆盖。reading 是附加层，音频对齐使用 reading/音素序列。
+- 网易云句首可能存在整首歌曲级偏移。偏移修正应作为独立预处理步骤，输出 `global_offset_ms` 并生成修正后的句级锚点；不能把它混入单句 CTC 的局部 margin。
 
 ## 4. 文本侧处理
 
@@ -70,7 +71,40 @@ python prepare_reading.py --backend openjtalk --out results/reading_openjtalk
 
 `surface → reading` 不保证逐字符唯一映射。词典可能将 `君` 读成 `きみ` 或其他候选，歌手还可能使用特殊读法。因此每行都要保留 `method`、`confidence` 和 `warnings`。
 
+当前实验产物中的 `tokens` 是 Sudachi 词边界，`mora[].chars` 是 reading 字符，并**不是**原文字符到假名的映射。因此它目前还不能可靠地渲染“每个汉字上方的假名”。要支持注音显示，统一产物还需要增加 `surface_spans`：
+
+```json
+"surface_spans": [
+  {"surface": "夏", "surface_start": 3, "surface_end": 4,
+   "reading": "なつ", "reading_start": 3, "reading_end": 5,
+   "romaji": "natsu", "mora_indices": [3, 4]}
+]
+```
+
+`surface_start/end` 和 `reading_start/end` 使用 Python 字符串索引（不是 UTF-8 字节偏移）；标点和空白可有 span 但不参与音频对齐。一个 surface 字符可以覆盖多个 reading/mora，一个 reading mora 也可以对应多个 surface 字符；无法唯一分配时应使用词级 span 并标记 `mapping_confidence=low`。渲染器可以据此在原文字符上方绘制假名，或按同一 span 聚合罗马音。
+
 ## 5. 音频侧处理
+
+### 5.0 全局偏移估计
+
+`offset_search.py` 在默认 ±2000 ms 范围内扫描候选偏移，比较歌词句首与音频局部能量起始的统计一致性。它只提供候选偏移，不能证明句首一定是人声；应优先使用人声 stem，或在 CTC 句级分数上做二次验证。最终产物保存原始和修正后的时间：
+
+```json
+"timing": {"original_start_ms": 33330, "global_offset_ms": -420, "start_ms": 32910}
+```
+
+只有当最佳候选明显优于 0 ms 且具有稳定峰值时才自动应用；否则保留 `global_offset_ms=0` 并标记 `offset_uncertain`。
+
+`apply_offset.py` 可把候选偏移写入独立的修正时间轴，永远不覆盖 `lyrics_timeline.json`：
+
+```bash
+python apply_offset.py \
+  --timeline samples/1372726250_サカナクション_ユリイカ/lyrics_timeline.json \
+  --offset-ms -440 \
+  --out results/offset_yuriyika_timeline.json
+```
+
+正值表示歌词整体向后，负值表示整体向前。修正文件保留 `original_start_ms/end_ms`，渲染器只读取修正后的 `start_ms/end_ms`。
 
 ### 5.1 活动窗口基线
 
@@ -132,6 +166,7 @@ CTC 模型输入人声波形，输出每个声学帧对词表标签的概率。�
 - `warnings`：面向诊断，不得导致手机端任务失败；
 - `mora` 按时间递增；相邻区间允许有空隙，不允许反向；
 - `chars` 可为空或多个字符，支持一个汉字对应多个 mora；
+- `surface_spans`（注音渲染必需）应覆盖原文中需要注音的字符；当前脚本尚未生成该字段，不能把现有 `tokens` 当作替代品；
 - 渲染器只依赖 `text`、`start_ms`、`end_ms` 和 `mora`，不需要理解模型 posterior。
 
 ## 7. 自动质量门控和回退
@@ -161,7 +196,56 @@ CTC 路径完整、覆盖率足够、分数过阈值
 4. 对已唱字符采用累积高亮，对当前字符使用更亮颜色；
 5. 视频生成不应依赖浏览器或在线模型服务。
 
-## 9. 可重复运行
+## 9. 服务形态和 Docker
+
+推荐把本项目实现成**可嵌入的 Python 库 + 可选 CLI**，而不是每次生成视频都通过 HTTP 调用：
+
+- 库 API 接受本地音频路径、句级 timeline 和配置，返回内存中的 `AlignmentResult`，并可写出 `alignment.json`；
+- CLI 负责批处理、缓存和日志；
+- 现有 CloudMusic2KTV 后端在同一 Python 运行时内直接调用库，避免上传/下载音频和 JSON 的额外延迟；
+- 如果未来需要独立 GPU 节点，再在库外增加异步 HTTP worker，API 仍应传递版本化 `alignment.json`，而不是让视频渲染器依赖模型服务在线可用。
+
+正式 Docker 部署建议：
+
+```text
+backend image
+  ├─ Python 代码 + FFmpeg + 字体
+  ├─ 不包含模型权重
+  └─ 挂载 /var/lib/lyric-models → models/
+```
+
+通过环境变量配置：
+
+- `LYRIC_MODEL_DIR=/var/lib/lyric-models`；
+- `HF_HOME=/var/lib/lyric-models/huggingface`；
+- `LYRIC_G2P_BACKEND=openjtalk`；
+- `LYRIC_DEVICE=cpu` 或 `cuda`（若节点有 GPU）。
+
+容器启动时使用 `local_files_only=true`；模型缺失应在健康检查/任务状态中报告明确错误，不应在视频请求期间偷偷联网下载。模型目录作为独立 Docker volume 或宿主机只读 bind mount 配置，升级镜像不改模型；模型版本写入 `alignment.json`。Demucs、wav2vec2 权重和 pyopenjtalk 词典均不进入镜像层。
+
+## 10. 耗时基线（Apple Silicon MacBook，CPU）
+
+以下是当前环境的实测量级，歌曲分别为《なつのせいです》（约 234 秒）和 19 首样本批处理；实际时间会随 CPU、线程和缓存变化：
+
+| 步骤 | 实测量级 | 是否可缓存 |
+|---|---:|---|
+| 单后端 G2P（19 首、653 行） | 约 1.2 s | 是，按歌词 hash |
+| 全样本短时能量（19 首） | 约 4.4 s | 是，按音频 hash |
+| Demucs 人声分离（234 s 歌曲） | 约 52 s CPU | 是，按模型+音频 hash |
+| wav2vec2 CTC（8 句） | 约 4.8 s（含模型加载） | 模型常驻后更快 |
+| wav2vec2 CTC（整首 36 句） | 约 10–30 s 量级 | 是，可按句窗口缓存 |
+
+耗时大头是 Demucs，其次是 CTC 推理；G2P 和能量分析可以忽略不计。当前 `ctc_align.py` 每次命令都会重新加载约 1.3 GB 模型，服务化时应让模型常驻进程并批量处理句窗口。
+
+## 11. 混合语言和非演唱行
+
+- 英文/数字：当前 reading 保留粗粒度 ASCII 单元；日语 CTC 词表对英文、URL、缩写和数字不一定有标签，需将这些 span 标记为 `unresolved` 或交给英文声学模型，不能强行映射成日语读音；
+- 片假名外来语：通常可由 OpenJTalk/Sudachi 处理，但歌手按英文发音演唱时可能偏离；
+- 括号注音（如 `海月（くらげ）`）：应优先使用显式 ruby，并从声学目标中去除括号内容重复；
+- 元数据、标题、作词/编曲：文本检测只能作为初筛。若句级窗口中人声活动比例接近 0，可标记 `non_sung`；但有伴奏、和声或呼吸时不能仅凭能量证明“有人声”。最终应综合 vocal-stem 活动、CTC 路径可行性和句间上下文；
+- 纯 instrumental/间奏：保留原行供显示审计，但不生成 mora，不参与 CTC。
+
+## 12. 可重复运行
 
 推荐命令顺序：
 

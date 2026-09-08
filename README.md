@@ -142,3 +142,22 @@ python ctc_mora.py
 python validate_artifacts.py \
   --artifact results/ctc_natsu_all_mora.json
 ```
+
+对整首歌词做 ±2 秒全局偏移扫描：
+
+```bash
+python offset_search.py \
+  --song 'samples/1372726250_サカナクション_ユリイカ'
+```
+
+结果和候选排名写入 `results/offset_yuriyika.json`，页面写入同名 `.html`。扫描结果是偏移候选，只有在峰值明显且 CTC/人声证据一致时才应写入正式 `alignment.json`。
+
+本次样本的扫描结果：原混音约 `-500 ms`，人声 stem 约 `-440 ms`，两者一致支持“歌词应整体提前约 0.45 秒”。如需生成不覆盖源文件的修正时间轴：
+
+```bash
+python apply_offset.py \
+  --timeline samples/1372726250_サカナクション_ユリイカ/lyrics_timeline.json \
+  --offset-ms -440 \
+  --duration-ms 337000 \
+  --out results/offset_yuriyika_timeline.json
+```

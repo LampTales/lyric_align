@@ -114,7 +114,13 @@ def main() -> None:
             for char, (left, right) in zip(chars, spans):
                 assigned = log_probs[left:right, vocab[char]] if right > left else log_probs[:0, vocab[char]]
                 confidence = float(assigned.mean().item()) if assigned.numel() else -99.0
-                tokens.append({"text": char, "start_ms": round((a / 16 + left * ratio) ), "end_ms": round((a / 16 + right * ratio)), "frame_confidence": round(confidence, 3)})
+                raw_start = round(a / 16 + left * ratio)
+                raw_end = round(a / 16 + right * ratio)
+                # The margin is a search aid only. Final artifacts must obey
+                # the line interval consumed by renderers.
+                clipped_start = max(start, min(end, raw_start))
+                clipped_end = max(clipped_start, min(end, raw_end))
+                tokens.append({"text": char, "start_ms": clipped_start, "end_ms": clipped_end, "frame_confidence": round(confidence, 3)})
             results.append({"text": line["text"], "reading": reading, "start_ms": start, "end_ms": end, "model_frames": int(logits.shape[0]), "ctc_score": round(score, 4), "tokens": tokens})
             print(line["text"], "=>", "".join(chars), "frames", logits.shape[0], "score", round(score, 3))
     args.out.write_text(json.dumps({"model": str(snapshot), "vocals": str(args.vocals), "lines": results}, ensure_ascii=False, indent=2), encoding="utf-8")
