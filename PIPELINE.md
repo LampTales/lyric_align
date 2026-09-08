@@ -22,11 +22,9 @@ lyric_align/
   models/        # 模型和词典缓存，被 .gitignore 忽略
   artifacts/     # 人声 stem、声学中间文件，被 .gitignore 忽略
   results/       # 可再生的 JSON/HTML 报告，被 .gitignore 忽略
-  align_baseline.py
-  prepare_reading.py
-  activity_baseline.py
-  ctc_align.py
-  ctc_mora.py
+  src/lyric_align/    # installable library
+  tests/              # API and schema regression tests
+  results/            # optional local reports (ignored)
 ```
 
 `samples/<song_dir>/` 至少需要：
@@ -51,7 +49,7 @@ lyric_align/
 
 ### 4.1 后端模式
 
-`prepare_reading.py --backend` 支持：
+`AlignmentConfig.g2p_backend`（以及 CLI 的 `--g2p-backend`）支持：
 
 - `pykakasi`：轻量、适合快速假名和罗马音；
 - `sudachi`：提供词边界和 UniDic 读音；
@@ -71,7 +69,7 @@ python prepare_reading.py --backend openjtalk --out results/reading_openjtalk
 
 `surface → reading` 不保证逐字符唯一映射。词典可能将 `君` 读成 `きみ` 或其他候选，歌手还可能使用特殊读法。因此每行都要保留 `method`、`confidence` 和 `warnings`。
 
-当前实验产物中的 `tokens` 是 Sudachi 词边界，`mora[].chars` 是 reading 字符，并**不是**原文字符到假名的映射。因此它目前还不能可靠地渲染“每个汉字上方的假名”。要支持注音显示，统一产物还需要增加 `surface_spans`：
+声学 `tokens` 是 CTC reading 字符，`mora[].chars` 是 reading 字符，并**不是**原文字符到假名的映射。原文注音使用独立的 `surface_spans`（由库自动生成）：
 
 ```json
 "surface_spans": [
@@ -128,7 +126,7 @@ CTC 模型输入人声波形，输出每个声学帧对词表标签的概率。�
 
 ## 6. 统一产物格式
 
-拟作为渲染器输入的统一文件名为 `alignment.json`。当前实验脚本分别输出 reading、activity 和 CTC 文件；迁移到生产时应合并成以下结构：
+库直接生成作为渲染器输入的统一文件 `alignment.json`：
 
 ```json
 {
@@ -166,7 +164,7 @@ CTC 模型输入人声波形，输出每个声学帧对词表标签的概率。�
 - `warnings`：面向诊断，不得导致手机端任务失败；
 - `mora` 按时间递增；相邻区间允许有空隙，不允许反向；
 - `chars` 可为空或多个字符，支持一个汉字对应多个 mora；
-- `surface_spans`（注音渲染必需）应覆盖原文中需要注音的字符；当前脚本尚未生成该字段，不能把现有 `tokens` 当作替代品；
+- `surface_spans`（注音渲染必需）由 `build_reading_lines()` 生成，应覆盖原文中需要注音的字符；它与声学 `tokens` 是不同层级，不能互相替代；
 - 渲染器只依赖 `text`、`start_ms`、`end_ms` 和 `mora`，不需要理解模型 posterior。
 
 ## 7. 自动质量门控和回退
@@ -174,7 +172,7 @@ CTC 模型输入人声波形，输出每个声学帧对词表标签的概率。�
 运行时按以下顺序选择：
 
 ```text
-CTC 路径完整、覆盖率足够、分数过阈值
+CTC 路径完整、覆盖率足够、分数过阈值（零时长边界先做可审计的显示修复）
   → 使用 CTC mora 时间
 
 否则存在可靠人声活动窗口
@@ -247,7 +245,18 @@ backend image
 
 ## 12. 可重复运行
 
-推荐命令顺序：
+推荐使用库或 CLI 一次完成所需阶段：
+
+```bash
+PYTHONPATH=src python -m lyric_align.cli prepare \
+  --song-dir samples/<song> --stages reading demucs ctc \
+  --demucs-model-path /models/demucs/<snapshot> \
+  --ctc-model-path /models/wav2vec2-japanese
+```
+
+阶段结果会写入 `alignment.json` 和 `preprocessing.json`。Demucs 的压缩 stem 可独立复用；CTC 失败时下次从句级窗口重新计算，不保存帧级 checkpoint。
+
+旧版实验脚本仍可用于复现实验报告，但不属于公开库 API：
 
 ```bash
 conda activate lyric

@@ -52,15 +52,24 @@ class AlignmentConfig:
     device: str = "cpu"
     ffmpeg_path: str = "ffmpeg"
     demucs_model_name: str = "htdemucs"
-    keep_vocals: bool = True
+    # Vocals are normally temporary input to CTC. Retaining them is opt-in so
+    # a completed song directory does not keep two extra full-length stems.
+    keep_vocals: bool = False
     keep_instrumental: bool = True
+    vocals_format: str = "mp3"
+    instrumental_format: str = "mp3"
+    vocals_bitrate: str = "192k"
+    instrumental_bitrate: str = "320k"
     sample_rate: int = 16_000
     offset_low_ms: int = -2_000
     offset_high_ms: int = 2_000
     offset_step_ms: int = 40
+    enable_offset: bool = True
     ctc_margin_ms: int = 500
     ctc_score_threshold: float = -1.5
-    pipeline_version: str = "0.1"
+    # Bump when deterministic post-processing changes invalidate cached
+    # alignment.json files (the current version includes CTC span repair).
+    pipeline_version: str = "0.3"
 
     def __post_init__(self) -> None:
         if self.g2p_backend not in {"openjtalk", "sudachi", "pykakasi"}:
@@ -73,6 +82,9 @@ class AlignmentConfig:
             raise ValueError("offset_step_ms must be positive")
         if self.ctc_margin_ms < 0:
             raise ValueError("ctc_margin_ms must not be negative")
+        for name in ("vocals_format", "instrumental_format"):
+            if getattr(self, name) not in {"mp3", "flac", "wav"}:
+                raise ValueError(f"{name} must be mp3, flac, or wav")
 
     def as_dict(self) -> dict:
         return {
@@ -82,12 +94,17 @@ class AlignmentConfig:
             "demucs_model_name": self.demucs_model_name,
             "keep_vocals": self.keep_vocals,
             "keep_instrumental": self.keep_instrumental,
+            "vocals_format": self.vocals_format,
+            "instrumental_format": self.instrumental_format,
+            "vocals_bitrate": self.vocals_bitrate,
+            "instrumental_bitrate": self.instrumental_bitrate,
             "sample_rate": self.sample_rate,
             "offset_search": {
                 "low_ms": self.offset_low_ms,
                 "high_ms": self.offset_high_ms,
                 "step_ms": self.offset_step_ms,
             },
+            "enable_offset": self.enable_offset,
             "ctc_margin_ms": self.ctc_margin_ms,
             "ctc_score_threshold": self.ctc_score_threshold,
             "pipeline_version": self.pipeline_version,

@@ -23,8 +23,12 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--ctc-model-path", type=Path)
     prepare.add_argument("--g2p-dictionary-path", type=Path)
     prepare.add_argument("--device", default="cpu")
-    prepare.add_argument("--drop-vocals", action="store_true")
+    prepare.add_argument("--keep-vocals", action="store_true", help="retain the vocal stem after CTC")
     prepare.add_argument("--drop-instrumental", action="store_true")
+    prepare.add_argument("--vocals-format", choices=("mp3", "flac", "wav"), default="mp3")
+    prepare.add_argument("--instrumental-format", choices=("mp3", "flac", "wav"), default="mp3")
+    prepare.add_argument("--instrumental-bitrate", default="320k")
+    prepare.add_argument("--disable-offset", action="store_true", help="do not estimate a song-level lyric offset")
     prepare.add_argument("--stages", nargs="+", choices=("reading", "demucs", "ctc"), default=["reading"], help="stages to run; demucs and ctc require their separate model paths")
     args = parser.parse_args(argv)
     if args.command == "validate":
@@ -33,8 +37,12 @@ def main(argv: list[str] | None = None) -> int:
     config = AlignmentConfig(
         g2p_backend=args.g2p_backend,
         device=args.device,
-        keep_vocals=not args.drop_vocals,
+        keep_vocals=args.keep_vocals,
         keep_instrumental=not args.drop_instrumental,
+        vocals_format=args.vocals_format,
+        instrumental_format=args.instrumental_format,
+        instrumental_bitrate=args.instrumental_bitrate,
+        enable_offset=not args.disable_offset,
         models=ModelPaths(
             demucs_model_path=args.demucs_model_path,
             ctc_model_path=args.ctc_model_path,

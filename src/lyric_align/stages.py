@@ -8,14 +8,113 @@ path from ``AlignmentConfig.models``.
 from __future__ import annotations
 
 import subprocess
+import os
 from pathlib import Path
 from typing import Any, Callable
 
 from .config import AlignmentConfig
 from .exceptions import StageUnavailableError
-from .io import write_json_atomic
-
+from .g2p import SMALL, split_mora
 ProgressCallback = Callable[[float, str], None]
+
+
+def _group_ctc_mora(tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: list[list[dict[str, Any]]] = []
+    for token in tokens:
+        if token.get("text") in SMALL and groups:
+            groups[-1].append(token)
+        else:
+            groups.append([token])
+    result = []
+    for group in groups:
+        result.append({
+            "text": "".join(str(item.get("text") or "") for item in group),
+            "start_ms": min(int(item["start_ms"]) for item in group),
+            "end_ms": max(int(item["end_ms"]) for item in group),
+            "frame_confidence": round(sum(float(item.get("frame_confidence", -99)) for item in group) / len(group), 3),
+            "chars": group,
+            "method": "ctc",
+        })
+    return result
+
+
+def _repair_token_spans(tokens: list[dict[str, Any]], start_ms: int, end_ms: int) -> tuple[list[dict[str, Any]], bool]:
+    """Make CTC token spans usable for cumulative karaoke highlighting.
+
+    CTC paths can assign adjacent symbols to the same acoustic frame.  The
+    resulting zero-duration spans are valid for recognition, but are too
+    short to be visible in a video renderer.  Repair only those spans by
+    distributing the gap between the surrounding reliable boundaries; all
+    non-zero boundaries are retained as far as possible.  The second return
+    value tells the caller whether any boundary had to be changed.
+    """
+    if not tokens:
+        return tokens, False
+    repaired = [dict(item) for item in tokens]
+    n = len(repaired)
+    raw = []
+    for item in repaired:
+        a = max(int(start_ms), min(int(end_ms), int(item.get("start_ms", start_ms))))
+        b = max(a, min(int(end_ms), int(item.get("end_ms", a))))
+        raw.append((a, b))
+    # Fast path: preserve the model's boundaries when they are already
+    # strictly usable.  This is the common case and avoids needless drift.
+    if all(b > a for a, b in raw) and all(raw[i][0] >= raw[i - 1][1] for i in range(1, n)):
+        return repaired, False
+
+    # When several symbols collapse to one CTC frame, use the observed
+    # positive durations as weights and give collapsed symbols the median
+    # positive duration.  Normalize the resulting partition to the sentence
+    # interval so every token remains visible and the sequence is monotonic.
+    positive = [b - a for a, b in raw if b > a]
+    fallback = max(1, sorted(positive)[len(positive) // 2] if positive else (int(end_ms) - int(start_ms)) // max(1, n))
+    weights = [max(1, b - a) if b > a else fallback for a, b in raw]
+    available = max(0, int(end_ms) - int(start_ms))
+    total = sum(weights)
+    cursor = int(start_ms)
+    for index, (item, weight) in enumerate(zip(repaired, weights)):
+        if index == n - 1:
+            boundary = int(end_ms)
+        else:
+            boundary = cursor + round(available * weight / max(1, total))
+            boundary = min(int(end_ms) - (n - index - 1), max(cursor + 1, boundary))
+        item["start_ms"], item["end_ms"] = cursor, max(cursor, boundary)
+        cursor = item["end_ms"]
+    return repaired, True
+
+
+def _save_stem(tensor: Any, path: Path, sample_rate: int, config: AlignmentConfig, bitrate: str) -> None:
+    """Save a stem atomically, using FFmpeg for compressed formats."""
+    # Keep the real extension on the temporary output so FFmpeg can select the
+    # correct muxer (``foo.mp3.part`` has no recognized format).
+    temporary = path.with_name(path.stem + ".part" + path.suffix)
+    wav = path.with_name(path.name + ".source.wav")
+    try:
+        # Avoid torchaudio's optional torchcodec writer.  FFmpeg accepts
+        # interleaved float32 PCM on stdin and is already a required runtime
+        # dependency of the library.
+        array = tensor.detach().cpu().float().contiguous().numpy()
+        if array.ndim == 1:
+            array = array[None, :]
+        interleaved = array.T.copy()
+        subprocess.run(
+            [config.ffmpeg_path, "-v", "error", "-y", "-f", "f32le", "-ar", str(sample_rate), "-ac", str(array.shape[0]), "-i", "pipe:0", "-c:a", "pcm_s16le", str(wav)],
+            input=interleaved.tobytes(), check=True,
+        )
+        if path.suffix.lower() == ".flac":
+            codec_args = ["-codec:a", "flac", "-compression_level", "8"]
+        elif path.suffix.lower() == ".wav":
+            codec_args = ["-codec:a", "pcm_s16le"]
+        else:
+            codec_args = ["-codec:a", "libmp3lame", "-b:a", bitrate]
+        subprocess.run([config.ffmpeg_path, "-v", "error", "-y", "-i", str(wav), *codec_args, str(temporary)], check=True)
+        temporary.replace(path)
+    finally:
+        for candidate in (temporary, wav):
+            try:
+                candidate.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def separate_stems(
@@ -34,16 +133,59 @@ def separate_stems(
         import torch
         import torchaudio
         from demucs.api import Separator
+        from demucs.repo import ModelLoadingError
     except ImportError as exc:
         raise StageUnavailableError("demucs, torch and torchaudio are required for stem separation") from exc
+    model_path = config.models.demucs_model_path
+    if model_path is None:
+        raise StageUnavailableError("demucs_model_path is required; provide a Demucs .th directory or Hugging Face snapshot")
+    model_path = Path(model_path)
+    use_hf_snapshot = False
+    if model_path.is_file():
+        if model_path.suffix != ".th":
+            raise StageUnavailableError("demucs_model_path must be a Demucs .th file or its containing directory")
+        repo_path = model_path.parent
+    elif model_path.is_dir():
+        if not any(model_path.glob("*.th")):
+            if any(model_path.glob("*.safetensors")) and any(model_path.glob("*.yaml")):
+                use_hf_snapshot = True
+                repo_path = model_path
+            else:
+                raise StageUnavailableError("demucs_model_path contains no usable .th or Hugging Face snapshot files")
+        else:
+            repo_path = model_path
+        repo_path = model_path
+    else:
+        raise StageUnavailableError(f"demucs_model_path does not exist: {model_path}")
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    separator = Separator(
-        model=config.demucs_model_name,
-        repo=config.models.demucs_model_path,
-        device=config.device,
-        progress=False,
-    )
+    try:
+        if use_hf_snapshot:
+            # demucs.api resolves HF snapshots through huggingface_hub. Point
+            # it at the cache containing the supplied snapshot and force
+            # offline resolution, avoiding an implicit network download.
+            cache_root = repo_path.parents[3] if len(repo_path.parents) > 3 and repo_path.parent.name == "snapshots" else repo_path
+            previous_home = os.environ.get("HF_HOME")
+            previous_offline = os.environ.get("HF_HUB_OFFLINE")
+            os.environ["HF_HOME"] = str(cache_root)
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            try:
+                separator = Separator(model=config.demucs_model_name, repo=None, device=config.device, progress=False)
+            finally:
+                if previous_home is None:
+                    os.environ.pop("HF_HOME", None)
+                else:
+                    os.environ["HF_HOME"] = previous_home
+                if previous_offline is None:
+                    os.environ.pop("HF_HUB_OFFLINE", None)
+                else:
+                    os.environ["HF_HUB_OFFLINE"] = previous_offline
+        else:
+            separator = Separator(model=config.demucs_model_name, repo=repo_path, device=config.device, progress=False)
+    except ModelLoadingError as exc:
+        raise StageUnavailableError(f"unable to load Demucs model {config.demucs_model_name} from {repo_path}: {exc}") from exc
+    except Exception as exc:
+        raise StageUnavailableError(f"unable to load Demucs model {config.demucs_model_name} from {repo_path}: {exc}") from exc
     if progress:
         progress(0.05, "running Demucs")
     _, stems = separator.separate_audio_file(Path(audio_path))
@@ -55,12 +197,12 @@ def separate_stems(
     stem_dir.mkdir(parents=True, exist_ok=True)
     result: dict[str, str | None] = {"vocals": None, "instrumental": None}
     if config.keep_vocals:
-        path = stem_dir / "vocals.flac"
-        torchaudio.save(str(path), vocals.detach().cpu(), separator.samplerate, format="FLAC")
+        path = stem_dir / f"vocals.{config.vocals_format}"
+        _save_stem(vocals, path, separator.samplerate, config, config.vocals_bitrate)
         result["vocals"] = str(path.relative_to(destination))
     if config.keep_instrumental:
-        path = stem_dir / "instrumental.flac"
-        torchaudio.save(str(path), instrumental.detach().cpu(), separator.samplerate, format="FLAC")
+        path = stem_dir / f"instrumental.{config.instrumental_format}"
+        _save_stem(instrumental, path, separator.samplerate, config, config.instrumental_bitrate)
         result["instrumental"] = str(path.relative_to(destination))
     if progress:
         progress(1.0, "stems written")
@@ -72,7 +214,7 @@ def _decode_audio(path: Path, ffmpeg_path: str, sample_rate: int) -> Any:
         import numpy as np
     except ImportError as exc:
         raise StageUnavailableError("numpy is required for CTC alignment") from exc
-    raw = subprocess.check_output([ffmpeg_path, "-v", "error", "-i", str(path), "-ac", "1", "-ar", str(sample_rate), "-f", "f32le", "pipe:1"])
+    raw = subprocess.check_output([ffmpeg_path, "-v", "error", "-i", str(path), "-ac", "1", "-ar", str(sample_rate), "-f", "f32le", "pipe:1"], stderr=subprocess.PIPE)
     return np.frombuffer(raw, dtype=np.float32)
 
 
@@ -160,16 +302,24 @@ def align_ctc(
                 token_end = max(token_start, min(end, raw_end))
                 confidence = log_probs[a:b, vocab[char]].mean().item() if b > a else -99.0
                 tokens.append({"text": char, "start_ms": token_start, "end_ms": token_end, "frame_confidence": round(float(confidence), 3)})
+            tokens, repaired = _repair_token_spans(tokens, start, end)
             coverage = len(tokens) / max(1, len(str(line["reading"])))
             updated = dict(line)
             updated["ctc_score"] = round(score, 4)
             updated["tokens"] = tokens
-            updated["alignment_status"] = "ctc" if coverage >= 0.8 and score >= config.ctc_score_threshold else "fallback"
+            positive_ratio = sum(int(item["end_ms"] > item["start_ms"]) for item in tokens) / max(1, len(tokens))
+            updated["alignment_status"] = "ctc" if coverage >= 0.8 and score >= config.ctc_score_threshold and positive_ratio >= 1.0 else "fallback"
             if updated["alignment_status"] == "ctc":
-                updated["mora"] = tokens
+                updated["mora"] = _group_ctc_mora(tokens)
+                updated["coverage"] = round(coverage, 3)
                 updated["method"] = "demucs+ctc"
+                if repaired:
+                    updated.setdefault("warnings", []).append("CTC zero-duration spans repaired for display")
             else:
+                updated["coverage"] = round(coverage, 3)
                 updated.setdefault("warnings", []).append("CTC quality gate failed")
+                if positive_ratio < 1.0:
+                    updated["warnings"].append("CTC produced zero-duration token; using interpolation")
             output.append(updated)
             if progress:
                 progress((index + 1) / max(1, len(alignable)), f"aligned line {index + 1}/{len(lines)}")

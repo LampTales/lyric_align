@@ -24,7 +24,7 @@ entries, negative timestamps, and intervals whose end precedes their start.
 
 ```python
 ModelPaths(
-    demucs_model_path=...,       # Demucs repository/checkpoint
+    demucs_model_path=...,       # Demucs .th directory or HF snapshot
     ctc_model_path=...,          # Transformers CTC checkpoint
     g2p_dictionary_path=...,     # optional dictionary data
     whisper_model_path=...,      # reserved for an optional recognizer
@@ -46,10 +46,15 @@ artifact = prepare_song(
 ```
 
 The default stage tuple is `("reading",)`, which is lightweight and only
-creates mora interpolation. Requesting `demucs` writes optional
-`stems/vocals.flac` and `stems/instrumental.flac`; requesting `ctc` requires a
-vocal stem and a CTC model. Heavy imports are lazy and failures are reported
-as `StageUnavailableError` rather than silently falling back.
+creates mora interpolation. Requesting `demucs` writes optional compressed
+stems. By default the vocal stem is temporary and the retained
+`stems/instrumental.mp3` uses 320 kbps. Set `keep_vocals=True` to retain
+vocals, and select `mp3`, `flac`, or `wav` independently with `vocals_format`
+and `instrumental_format`. Requesting `ctc` requires a vocal
+stem and a CTC model. Heavy imports are lazy and failures are reported as
+`StageUnavailableError` rather than silently falling back. WAV is only used as
+a temporary conversion file when an MP3 stem is requested and is removed after
+conversion.
 
 `alignment.json` contains:
 
@@ -61,6 +66,36 @@ as `StageUnavailableError` rather than silently falling back.
 - `models`: the independently supplied resource paths/provenance;
 - `artifacts`: relative stem and preprocessing paths, or `null` when absent.
 
+Offset estimation is enabled by default and searches the configured bounded
+window. If audio decoding fails, the artifact is still produced with
+`offset_status="error"` and a zero offset; offset correction is an enhancement
+and never blocks baseline reading generation. Use `enable_offset=False` when a
+caller supplies its own timing anchors.
+
+Each line may also contain `surface_spans`. A span maps a displayed substring
+to a reading substring, generated romaji and the corresponding mora indices.
+Ambiguous kanji mappings are retained as a word-level span with
+`mapping_confidence="low"` rather than being presented as a false
+character-level certainty.
+
 Downstream applications should consume the schema rather than import a model
 adapter. A failed enhanced stage can therefore leave the original timeline
 usable while preserving any successfully generated stem files.
+
+Preparation is stage-cacheable. A completed `alignment.json` is reused when
+the audio/lyrics hashes and full configuration signature match. A completed
+Demucs stage is independently reusable from `preprocessing.json` when its
+compressed stem files and stage signature are valid. Demucs is not resumed
+mid-song; interrupted or incomplete files are regenerated atomically.
+
+For a split workflow, run Demucs with `keep_vocals=True` and later request
+`stages=("reading", "ctc")`; the persisted vocal stem is discovered from
+`preprocessing.json`. With the default temporary-vocal policy, a later CTC-only
+request correctly reports that the vocal input is unavailable and reruns
+Demucs when both stages are requested.
+
+CTC paths occasionally assign adjacent symbols to one acoustic frame. Before
+the quality gate, the library repairs such collapsed spans by a deterministic
+duration-weighted partition of the sentence interval and records a warning on
+the line. This keeps cumulative karaoke highlighting continuous without
+claiming additional acoustic evidence.

@@ -3,17 +3,58 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import hashlib
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
 from .config import AlignmentConfig
 from .exceptions import InputValidationError, StageUnavailableError
-from .g2p import NON_SUNG, convert, romaji, split_mora
+from .g2p import NON_SUNG, build_surface_spans, convert, romaji, split_mora
 from .io import sha256_file, validate_song_directory, write_json_atomic
+from .offset import estimate_offset
 from .schema import AlignmentArtifact, AlignmentLine, ArtifactPaths
 from .stages import align_ctc, separate_stems
 
 ProgressCallback = Callable[[str, float, str], None]
+
+
+def _config_signature(config: AlignmentConfig, stages: tuple[str, ...]) -> str:
+    payload = json.dumps({"config": config.as_dict(), "stages": sorted(set(stages))}, ensure_ascii=False, sort_keys=True).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _stage_signature(config: AlignmentConfig, stage: str) -> str:
+    if stage == "reading":
+        values = {"g2p_backend": config.g2p_backend, "g2p_dictionary_path": str(config.models.g2p_dictionary_path) if config.models.g2p_dictionary_path else None}
+    elif stage == "demucs":
+        values = {"demucs_model_name": config.demucs_model_name, "demucs_model_path": str(config.models.demucs_model_path) if config.models.demucs_model_path else None, "device": config.device, "keep_vocals": config.keep_vocals, "keep_instrumental": config.keep_instrumental, "vocals_format": config.vocals_format, "instrumental_format": config.instrumental_format, "vocals_bitrate": config.vocals_bitrate, "instrumental_bitrate": config.instrumental_bitrate}
+    elif stage == "ctc":
+        values = {"ctc_model_path": str(config.models.ctc_model_path) if config.models.ctc_model_path else None, "device": config.device, "sample_rate": config.sample_rate, "ctc_margin_ms": config.ctc_margin_ms, "ctc_score_threshold": config.ctc_score_threshold, "pipeline_version": config.pipeline_version}
+    else:
+        values = config.as_dict()
+    payload = json.dumps(values, ensure_ascii=False, sort_keys=True).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _load_artifact(path: Path) -> AlignmentArtifact | None:
+    try:
+        return AlignmentArtifact.from_dict(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _load_preprocessing(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {}
+
+
+def _stage_done(artifact: AlignmentArtifact | None, name: str, signature: str) -> bool:
+    return bool(artifact and artifact.inputs.get("config_sha256") == signature and artifact.stages.get(name, {}).get("status") == "done")
 
 
 def validate_song(song_dir: str | Path) -> dict[str, Any]:
@@ -72,7 +113,7 @@ def build_reading_lines(song_dir: Path, config: AlignmentConfig) -> list[Alignme
             lines.append(AlignmentLine(source_index, text, start_ms=start, end_ms=end, status="unresolved", method=config.g2p_backend, warnings=["empty reading"]))
             continue
         mora = _timed_mora(reading, start, end)
-        lines.append(AlignmentLine(source_index, text, reading=reading, romaji=romaji(reading), start_ms=start, end_ms=end, status="interpolation", method=config.g2p_backend, confidence=None, mora=mora, warnings=warnings))
+        lines.append(AlignmentLine(source_index, text, reading=reading, romaji=romaji(reading), start_ms=start, end_ms=end, status="interpolation", method=config.g2p_backend, confidence=None, mora=mora, surface_spans=build_surface_spans(text, reading, reading_data.get("tokens")), warnings=warnings))
     return lines
 
 
@@ -93,38 +134,115 @@ def prepare_song(
     config = config or AlignmentConfig()
     song_dir = Path(song_dir)
     files = validate_song_directory(song_dir)
+    destination = Path(output_path) if output_path is not None else song_dir / "alignment.json"
+    signature = _config_signature(config, stages)
+    cached = _load_artifact(destination)
+    preprocessing = _load_preprocessing(song_dir / "preprocessing.json")
+    requested = {name for name in stages if name in {"reading", "demucs", "ctc"}}
+    if cached and cached.inputs.get("audio", {}).get("sha256") == sha256_file(files["audio"]) and cached.inputs.get("lyrics_timeline", {}).get("sha256") == sha256_file(files["timeline"]):
+        if all(_stage_done(cached, name, signature) for name in requested):
+            return cached
     if progress:
         progress("reading", 0.0, "building lyric readings")
     lines = build_reading_lines(song_dir, config)
     metadata = json.loads(files["metadata"].read_text(encoding="utf-8"))
-    stage_state: dict[str, Any] = {"reading": {"status": "done", "backend": config.g2p_backend}, "demucs": {"status": "not_run"}, "ctc": {"status": "not_run"}}
+    stage_state: dict[str, Any] = {"reading": {"status": "done", "backend": config.g2p_backend, "signature": _stage_signature(config, "reading")}, "demucs": {"status": "not_run"}, "ctc": {"status": "not_run"}}
     stem_paths = {"vocals": None, "instrumental": None}
     line_values = [line.__dict__.copy() for line in lines]
     if "demucs" in stages:
         if not config.models.demucs_model_path:
-            # A None path is allowed by Demucs for its own cache, but making
-            # this explicit avoids accidentally downloading from a worker.
             raise StageUnavailableError("demucs_model_path is required when the demucs stage is requested")
-        stage_state["demucs"] = {"status": "running", "model": config.demucs_model_name}
-        stem_paths = separate_stems(files["audio"], song_dir, config, lambda fraction, message: progress("demucs", fraction, message) if progress else None)
-        stage_state["demucs"] = {"status": "done", "model": config.demucs_model_name, "artifacts": stem_paths}
+        expected_vocal = song_dir / "stems" / f"vocals.{config.vocals_format}"
+        expected_instrumental = song_dir / "stems" / f"instrumental.{config.instrumental_format}"
+        cached_stems = bool(
+            preprocessing.get("demucs", {}).get("signature") == _stage_signature(config, "demucs")
+            or (cached and cached.stages.get("demucs", {}).get("signature") == _stage_signature(config, "demucs"))
+        )
+        need_vocal = "ctc" in stages or config.keep_vocals
+        cached_stems = cached_stems and (not need_vocal or expected_vocal.is_file()) and (not config.keep_instrumental or expected_instrumental.is_file())
+        if cached_stems:
+            stem_paths = {"vocals": str(expected_vocal.relative_to(song_dir)) if expected_vocal.is_file() else None, "instrumental": str(expected_instrumental.relative_to(song_dir)) if expected_instrumental.is_file() else None}
+            # Prefer the alignment's stage record, but also support reusing a
+            # completed preprocessing.json when this invocation writes to a
+            # different output path (or when the previous alignment is absent).
+            stage_state["demucs"] = dict(
+                (cached.stages.get("demucs") if cached else None)
+                or preprocessing.get("demucs")
+                or {"status": "done", "signature": _stage_signature(config, "demucs"), "artifacts": stem_paths}
+            )
+        else:
+            stage_state["demucs"] = {"status": "running", "model": config.demucs_model_name}
+            # CTC needs a vocal file while it runs. It can be temporary when
+            # the caller chooses keep_vocals=False, avoiding duplicate audio.
+            demucs_config = replace(config, keep_vocals=True) if "ctc" in stages and not config.keep_vocals else config
+            stem_paths = separate_stems(files["audio"], song_dir, demucs_config, lambda fraction, message: progress("demucs", fraction, message) if progress else None)
+            stage_state["demucs"] = {"status": "done", "model": config.demucs_model_name, "artifacts": stem_paths, "signature": _stage_signature(config, "demucs")}
+            write_json_atomic(song_dir / "preprocessing.json", {"status": "demucs_ready", "demucs": stage_state["demucs"], "artifacts": stem_paths, "config": config.as_dict()})
+    elif "ctc" in stages:
+        # Permit a two-step workflow: callers may run Demucs once with
+        # ``keep_vocals=True`` and invoke CTC later.  Reuse the persisted stem
+        # only when it is still present; a previous CTC run with temporary
+        # vocals intentionally leaves no input for a CTC-only retry.
+        recorded = preprocessing.get("demucs", {}).get("artifacts") or preprocessing.get("artifacts") or {}
+        vocal_ref = recorded.get("vocals")
+        if vocal_ref and (song_dir / vocal_ref).is_file():
+            stem_paths["vocals"] = str(vocal_ref)
+        else:
+            candidate = song_dir / "stems" / f"vocals.{config.vocals_format}"
+            if candidate.is_file():
+                stem_paths["vocals"] = str(candidate.relative_to(song_dir))
+    offset_audio = song_dir / stem_paths["vocals"] if stem_paths.get("vocals") else files["audio"]
+    if config.enable_offset and line_values:
+        try:
+            offset = estimate_offset(offset_audio, [int(line["start_ms"]) for line in line_values], config)
+        except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+            # Offset correction is an enhancement; malformed/unavailable audio
+            # must not prevent generation of the reading baseline.
+            offset = {"offset_ms": 0, "status": "error", "error": str(exc), "candidates": []}
+    else:
+        offset = {"offset_ms": 0, "status": "disabled", "candidates": []}
+    global_offset = int(offset.get("offset_ms") or 0)
+    if global_offset:
+        for line in line_values:
+            line["original_start_ms"] = line["start_ms"]
+            line["original_end_ms"] = line["end_ms"]
+            line["start_ms"] = max(0, int(line["start_ms"]) + global_offset)
+            line["end_ms"] = max(line["start_ms"], int(line["end_ms"]) + global_offset)
+            for mora in line.get("mora", []):
+                mora["start_ms"] = max(line["start_ms"], int(mora["start_ms"]) + global_offset)
+                mora["end_ms"] = max(mora["start_ms"], min(line["end_ms"], int(mora["end_ms"]) + global_offset))
     if "ctc" in stages:
         vocal = stem_paths.get("vocals")
         if not vocal:
-            raise StageUnavailableError("ctc stage requires Demucs vocals output and keep_vocals=True")
+            raise StageUnavailableError("ctc stage requires a Demucs vocals output")
         stage_state["ctc"] = {"status": "running", "model": str(config.models.ctc_model_path)}
-        ctc_lines = align_ctc(song_dir / vocal, line_values, config, lambda fraction, message: progress("ctc", fraction, message) if progress else None)
-        line_values = ctc_lines
-        stage_state["ctc"] = {"status": "done", "model": str(config.models.ctc_model_path)}
+        try:
+            ctc_lines = align_ctc(song_dir / vocal, line_values, config, lambda fraction, message: progress("ctc", fraction, message) if progress else None)
+            line_values = ctc_lines
+            stage_state["ctc"] = {"status": "done", "model": str(config.models.ctc_model_path), "signature": _stage_signature(config, "ctc")}
+        finally:
+            if not config.keep_vocals:
+                try:
+                    (song_dir / vocal).unlink()
+                except FileNotFoundError:
+                    pass
+                stem_paths["vocals"] = None
     allowed = set(AlignmentLine.__dataclass_fields__)
-    final_lines = [AlignmentLine(**{key: value for key, value in line.items() if key in allowed}) for line in line_values]
+    final_lines = []
+    for line in line_values:
+        values = {key: value for key, value in line.items() if key in allowed}
+        # Keep the public status consistent with the selected alignment
+        # evidence while retaining the original G2P method in ``method``.
+        if values.get("alignment_status") in {"ctc", "fallback"}:
+            values["status"] = values["alignment_status"]
+        final_lines.append(AlignmentLine(**values))
     artifact = AlignmentArtifact(
         song={key: metadata.get(key) for key in ("id", "name", "artist", "album", "duration_ms") if key in metadata},
         # Paths in a portable artifact are relative names, never the caller's
         # absolute filesystem paths.  Hashes still make cache invalidation
         # deterministic across machines.
-        inputs={"audio": {"path": files["audio"].name, "sha256": sha256_file(files["audio"])}, "lyrics_timeline": {"path": files["timeline"].name, "sha256": sha256_file(files["timeline"]) }},
-        timing={"global_offset_ms": 0, "offset_status": "not_run"},
+        inputs={"audio": {"path": files["audio"].name, "sha256": sha256_file(files["audio"])}, "lyrics_timeline": {"path": files["timeline"].name, "sha256": sha256_file(files["timeline"]) }, "config_sha256": signature},
+        timing={"global_offset_ms": global_offset, "offset_status": offset.get("status", "unknown"), "diagnostics": offset},
         lines=final_lines,
         stages=stage_state,
         models=config.models.as_dict(),
@@ -134,9 +252,28 @@ def prepare_song(
         artifacts=ArtifactPaths(vocals=stem_paths.get("vocals"), instrumental=stem_paths.get("instrumental")),
     )
     artifact.validate()
-    destination = Path(output_path) if output_path is not None else song_dir / "alignment.json"
     write_json_atomic(destination, artifact.to_dict())
-    write_json_atomic(song_dir / "preprocessing.json", {"status": "reading_ready", "alignment": str(destination.name), "config": config.as_dict()})
+    completed = "ctc" in stages and stage_state["ctc"].get("status") == "done"
+    prep_status = "ready" if completed else ("demucs_ready" if stage_state["demucs"].get("status") == "done" else "reading_ready")
+    try:
+        alignment_ref = str(destination.relative_to(song_dir))
+    except ValueError:
+        # A caller may deliberately place the artifact outside the song
+        # directory (for example, in a central results volume).  Preserve a
+        # usable path instead of pretending it is ``alignment.json`` nearby.
+        alignment_ref = str(destination)
+    write_json_atomic(
+        song_dir / "preprocessing.json",
+        {
+            "status": prep_status,
+            "alignment": alignment_ref,
+            "stages": stage_state,
+            "demucs": stage_state.get("demucs"),
+            "ctc": stage_state.get("ctc"),
+            "artifacts": artifact.artifacts.__dict__,
+            "config": config.as_dict(),
+        },
+    )
     if progress:
         progress("reading", 1.0, "alignment baseline written")
     return artifact

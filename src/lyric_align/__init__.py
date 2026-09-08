@@ -6,6 +6,7 @@ dictionary; no model is downloaded or bundled by this package.
 """
 
 from .config import AlignmentConfig, ModelPaths
+from .exceptions import InputValidationError, LyricAlignError, StageUnavailableError
 from .pipeline import prepare_song, validate_song
 from .schema import AlignmentArtifact, AlignmentLine, ArtifactPaths
 
@@ -17,6 +18,9 @@ __all__ = [
     "ArtifactPaths",
     "prepare_song",
     "validate_song",
+    "LyricAlignError",
+    "InputValidationError",
+    "StageUnavailableError",
 ]
 
 __version__ = "0.1.0"

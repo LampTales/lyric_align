@@ -16,8 +16,8 @@ class ArtifactPaths:
 
     alignment: str = "alignment.json"
     preprocessing: str = "preprocessing.json"
-    vocals: str | None = "stems/vocals.flac"
-    instrumental: str | None = "stems/instrumental.flac"
+    vocals: str | None = "stems/vocals.mp3"
+    instrumental: str | None = "stems/instrumental.mp3"
 
 
 @dataclass
@@ -28,9 +28,15 @@ class AlignmentLine:
     romaji: str = ""
     start_ms: int = 0
     end_ms: int = 0
+    original_start_ms: int | None = None
+    original_end_ms: int | None = None
     status: str = "unresolved"
     method: str = ""
     confidence: float | None = None
+    ctc_score: float | None = None
+    coverage: float | None = None
+    alignment_status: str | None = None
+    tokens: list[dict[str, Any]] = field(default_factory=list)
     mora: list[dict[str, Any]] = field(default_factory=list)
     surface_spans: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -46,6 +52,10 @@ class AlignmentLine:
             if start < previous:
                 raise ValueError("mora times must be monotonic")
             previous = start
+        for item in self.tokens:
+            start, end = int(item["start_ms"]), int(item["end_ms"])
+            if start < self.start_ms or end < start or end > self.end_ms:
+                raise ValueError("CTC token time must be inside its line interval")
 
 
 @dataclass

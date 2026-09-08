@@ -28,7 +28,7 @@ result = prepare_song(
     config=AlignmentConfig(
         g2p_backend="openjtalk",
         models=ModelPaths(
-            demucs_model_path="/models/demucs/htdemucs",
+        demucs_model_path="/models/demucs/htdemucs",  # .th dir or HF snapshot
             ctc_model_path="/models/wav2vec2-japanese",
             g2p_dictionary_path="/models/sudachi",
         ),
@@ -39,6 +39,12 @@ result = prepare_song(
 The separate fields are intentional: a future backend can add another model
 path without forcing users to merge unrelated model directories. FFmpeg is a
 system executable (`ffmpeg_path`), not a Python or model dependency.
+
+For a compact persistent output, the default Demucs policy keeps only an
+`instrumental.mp3` at 320 kbps; the vocal stem is temporary unless
+`keep_vocals=True`. Re-running preparation reuses a matching alignment or
+completed Demucs stage using the input/config signatures recorded in
+`preprocessing.json`.
 
 输入/输出契约、时间语义、回退策略和生产接入边界见 [PIPELINE.md](/Users/lamptales/remote/cloudmusic2ktv/lyric_align/PIPELINE.md)。
 

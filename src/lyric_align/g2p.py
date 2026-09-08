@@ -99,3 +99,91 @@ def convert(text: str, backend: str) -> dict[str, Any]:
             raise RuntimeError("pyopenjtalk is required for g2p_backend=openjtalk") from exc
         return {"reading": kata_to_hira(pyopenjtalk.g2p(text, kana=True)), "phonemes": pyopenjtalk.g2p(text, kana=False), "backend": backend, "tokens": []}
     raise ValueError(f"unsupported G2P backend: {backend}")
+
+
+def build_surface_spans(text: str, reading: str, tokens: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
+    """Map displayed surface text to reading/romaji ranges.
+
+    Token boundaries are preferred (Sudachi). Without them, kana is mapped
+    one-to-one where possible and ambiguous kanji runs become a single
+    low-confidence span rather than a misleading character-level mapping.
+    """
+    tokens = tokens or []
+    spans: list[dict[str, Any]] = []
+    surface_offset = reading_offset = 0
+    for token in tokens:
+        surface = str(token.get("surface") or "")
+        token_reading = kata_to_hira(str(token.get("reading") or ""))
+        if not surface:
+            continue
+        surface_start = text.find(surface, surface_offset)
+        if surface_start < 0:
+            continue
+        surface_end = surface_start + len(surface)
+        read_start = reading.find(token_reading, reading_offset) if token_reading else reading_offset
+        if read_start < 0:
+            read_start = reading_offset
+        read_end = min(len(reading), read_start + len(token_reading))
+        confidence = "high" if token_reading and read_end > read_start else "low"
+        # A token with one displayed character can safely own all of its
+        # reading mora; multi-character kanji is retained as a token span.
+        if len(surface) == 1 or all(KANA.match(char) for char in surface):
+            for index, char in enumerate(surface):
+                a = read_start + round((read_end - read_start) * index / max(1, len(surface)))
+                b = read_start + round((read_end - read_start) * (index + 1) / max(1, len(surface)))
+                spans.append(_surface_span(text, index + surface_start, index + surface_start + 1, reading, a, b, "high" if len(surface) == 1 else confidence))
+        else:
+            spans.append(_surface_span(text, surface_start, surface_end, reading, read_start, read_end, "low"))
+        surface_offset, reading_offset = surface_end, read_end
+    if spans:
+        return spans
+    # Generic fallback for pykakasi/OpenJTalk where token data is unavailable.
+    if len(text) == len(reading):
+        return [_surface_span(text, i, i + 1, reading, i, i + 1, "medium") for i in range(len(text))]
+    if text and reading:
+        # Use an unchanged kana suffix/prefix as an anchor. The reading before
+        # that anchor is normally the pronunciation of a preceding kanji run
+        # (e.g. ``夏のせい`` → ``なつ`` + ``のせい``).
+        kana_match = re.search(r"[ぁ-ゖァ-ヺー]+", text)
+        if kana_match:
+            anchor = kata_to_hira(kana_match.group(0))
+            anchor_start = reading.find(anchor)
+            if anchor_start > 0 and kana_match.start() > 0:
+                result = [_surface_span(text, 0, kana_match.start(), reading, 0, anchor_start, "low")]
+                for index, char in enumerate(text[kana_match.start():], start=kana_match.start()):
+                    read_index = anchor_start + index - kana_match.start()
+                    result.append(_surface_span(text, index, index + 1, reading, read_index, min(len(reading), read_index + 1), "medium"))
+                return result
+        visible = [index for index, char in enumerate(text) if char.strip()]
+        if visible:
+            result = []
+            for position, surface_index in enumerate(visible):
+                a = round(len(reading) * position / len(visible))
+                b = round(len(reading) * (position + 1) / len(visible))
+                confidence = "medium" if KANA.match(text[surface_index]) else "low"
+                result.append(_surface_span(text, surface_index, surface_index + 1, reading, a, b, confidence))
+            return result
+    return []
+
+
+def _surface_span(text: str, surface_start: int, surface_end: int, reading: str, reading_start: int, reading_end: int, confidence: str) -> dict[str, Any]:
+    value = text[surface_start:surface_end]
+    reading_value = reading[reading_start:reading_end]
+    mora_ranges: list[tuple[int, int]] = []
+    for mora_index, mora in enumerate(split_mora(reading)):
+        cursor = reading.find(mora, mora_ranges[-1][1] if mora_ranges else 0)
+        if cursor < 0:
+            continue
+        mora_ranges.append((cursor, cursor + len(mora)))
+    mora_indices = [index for index, (a, b) in enumerate(mora_ranges) if b > reading_start and a < reading_end]
+    return {
+        "surface": value,
+        "surface_start": surface_start,
+        "surface_end": surface_end,
+        "reading": reading_value,
+        "reading_start": reading_start,
+        "reading_end": reading_end,
+        "romaji": romaji(reading_value),
+        "mora_indices": mora_indices,
+        "mapping_confidence": confidence,
+    }
