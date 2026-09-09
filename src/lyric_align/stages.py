@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import subprocess
 import os
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,6 +17,39 @@ from .config import AlignmentConfig
 from .exceptions import StageUnavailableError
 from .g2p import SMALL, split_mora
 ProgressCallback = Callable[[float, str], None]
+
+
+# The KTV service processes many songs in one long-lived worker.  Keep model
+# objects resident between calls; the cache is intentionally process-local and
+# can be cleared explicitly when a model/device changes.
+_MODEL_CACHE_LOCK = threading.Lock()
+_CTC_MODEL_CACHE: dict[tuple[str, str], tuple[Any, Any, Any]] = {}
+_DEMUCS_MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
+
+
+def clear_model_cache() -> None:
+    """Release cached CTC and Demucs objects held by this process."""
+    with _MODEL_CACHE_LOCK:
+        _CTC_MODEL_CACHE.clear()
+        _DEMUCS_MODEL_CACHE.clear()
+
+
+def _load_ctc_bundle(model_path: str, device: str) -> tuple[Any, Any, Any]:
+    import torch
+    from transformers import AutoModelForCTC, AutoProcessor
+
+    key = (str(Path(model_path).resolve()), str(device))
+    with _MODEL_CACHE_LOCK:
+        cached = _CTC_MODEL_CACHE.get(key)
+        if cached is not None:
+            return cached
+    processor = AutoProcessor.from_pretrained(model_path, local_files_only=True)
+    model = AutoModelForCTC.from_pretrained(model_path, local_files_only=True).to(device).eval()
+    bundle = (processor, model, torch)
+    with _MODEL_CACHE_LOCK:
+        # If another caller loaded the same model while this one was reading,
+        # keep the first object and release the duplicate reference.
+        return _CTC_MODEL_CACHE.setdefault(key, bundle)
 
 
 def _group_ctc_mora(tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -159,33 +193,39 @@ def separate_stems(
         raise StageUnavailableError(f"demucs_model_path does not exist: {model_path}")
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
-    try:
-        if use_hf_snapshot:
-            # demucs.api resolves HF snapshots through huggingface_hub. Point
-            # it at the cache containing the supplied snapshot and force
-            # offline resolution, avoiding an implicit network download.
-            cache_root = repo_path.parents[3] if len(repo_path.parents) > 3 and repo_path.parent.name == "snapshots" else repo_path
-            previous_home = os.environ.get("HF_HOME")
-            previous_offline = os.environ.get("HF_HUB_OFFLINE")
-            os.environ["HF_HOME"] = str(cache_root)
-            os.environ["HF_HUB_OFFLINE"] = "1"
-            try:
-                separator = Separator(model=config.demucs_model_name, repo=None, device=config.device, progress=False)
-            finally:
-                if previous_home is None:
-                    os.environ.pop("HF_HOME", None)
-                else:
-                    os.environ["HF_HOME"] = previous_home
-                if previous_offline is None:
-                    os.environ.pop("HF_HUB_OFFLINE", None)
-                else:
-                    os.environ["HF_HUB_OFFLINE"] = previous_offline
-        else:
-            separator = Separator(model=config.demucs_model_name, repo=repo_path, device=config.device, progress=False)
-    except ModelLoadingError as exc:
-        raise StageUnavailableError(f"unable to load Demucs model {config.demucs_model_name} from {repo_path}: {exc}") from exc
-    except Exception as exc:
-        raise StageUnavailableError(f"unable to load Demucs model {config.demucs_model_name} from {repo_path}: {exc}") from exc
+    cache_key = (str(model_path.resolve()), config.demucs_model_name, str(config.device))
+    with _MODEL_CACHE_LOCK:
+        separator = _DEMUCS_MODEL_CACHE.get(cache_key)
+    if separator is None:
+        try:
+            if use_hf_snapshot:
+                # demucs.api resolves HF snapshots through huggingface_hub. Point
+                # it at the cache containing the supplied snapshot and force
+                # offline resolution, avoiding an implicit network download.
+                cache_root = repo_path.parents[3] if len(repo_path.parents) > 3 and repo_path.parent.name == "snapshots" else repo_path
+                previous_home = os.environ.get("HF_HOME")
+                previous_offline = os.environ.get("HF_HUB_OFFLINE")
+                os.environ["HF_HOME"] = str(cache_root)
+                os.environ["HF_HUB_OFFLINE"] = "1"
+                try:
+                    separator = Separator(model=config.demucs_model_name, repo=None, device=config.device, progress=False)
+                finally:
+                    if previous_home is None:
+                        os.environ.pop("HF_HOME", None)
+                    else:
+                        os.environ["HF_HOME"] = previous_home
+                    if previous_offline is None:
+                        os.environ.pop("HF_HUB_OFFLINE", None)
+                    else:
+                        os.environ["HF_HUB_OFFLINE"] = previous_offline
+            else:
+                separator = Separator(model=config.demucs_model_name, repo=repo_path, device=config.device, progress=False)
+        except ModelLoadingError as exc:
+            raise StageUnavailableError(f"unable to load Demucs model {config.demucs_model_name} from {repo_path}: {exc}") from exc
+        except Exception as exc:
+            raise StageUnavailableError(f"unable to load Demucs model {config.demucs_model_name} from {repo_path}: {exc}") from exc
+        with _MODEL_CACHE_LOCK:
+            separator = _DEMUCS_MODEL_CACHE.setdefault(cache_key, separator)
     if progress:
         progress(0.05, "running Demucs")
     _, stems = separator.separate_audio_file(Path(audio_path))
@@ -223,6 +263,16 @@ def _forced_align(log_probs: Any, target: list[int], blank: int) -> tuple[list[t
 
     if not target:
         return [], 0.0
+    if getattr(log_probs, "ndim", 0) != 2 or int(log_probs.shape[0]) <= 0:
+        return [(0, 0) for _ in target], -1e9
+    # A repeated CTC label needs an intervening blank frame.  If the model
+    # window cannot represent the target, return a deterministic quality-gate
+    # failure instead of backtracking into negative states.
+    minimum_frames = len(target) + sum(
+        int(target[index] == target[index - 1]) for index in range(1, len(target))
+    )
+    if int(log_probs.shape[0]) < minimum_frames:
+        return [(0, 0) for _ in target], -1e9
     extended = [blank]
     for value in target:
         extended.extend((value, blank))
@@ -245,8 +295,12 @@ def _forced_align(log_probs: Any, target: list[int], blank: int) -> tuple[list[t
     state = state_count - 1
     states = []
     for frame in range(frame_count - 1, -1, -1):
+        if state < 0 or state >= state_count:
+            return [(0, 0) for _ in target], -1e9
         states.append(state)
         state -= int(back[frame, state])
+        if state < 0 and frame > 0:
+            return [(0, 0) for _ in target], -1e9
     states.reverse()
     spans = []
     for index in range(len(target)):
@@ -264,20 +318,20 @@ def align_ctc(
 ) -> list[dict[str, Any]]:
     """Align known Japanese readings to a vocal stem using a CTC model."""
     try:
-        import torch
-        from transformers import AutoModelForCTC, AutoProcessor
+        import torch  # noqa: F401
+        import transformers  # noqa: F401
     except ImportError as exc:
         raise StageUnavailableError("torch and transformers are required for CTC alignment") from exc
     if config.models.ctc_model_path is None:
         raise StageUnavailableError("ctc_model_path must be provided for CTC alignment")
     model_path = str(config.models.ctc_model_path)
-    processor = AutoProcessor.from_pretrained(model_path, local_files_only=True)
-    model = AutoModelForCTC.from_pretrained(model_path, local_files_only=True).to(config.device).eval()
+    processor, model, torch = _load_ctc_bundle(model_path, config.device)
     audio = _decode_audio(Path(vocal_path), config.ffmpeg_path, config.sample_rate)
     vocab = processor.tokenizer.get_vocab()
     blank = int(processor.tokenizer.pad_token_id or 0)
     output = []
     alignable = [line for line in lines if line.get("reading") and line.get("status") != "non_sung"]
+    completed = 0
     with torch.inference_mode():
         for index, line in enumerate(lines):
             if not line.get("reading") or line.get("status") == "non_sung":
@@ -321,6 +375,7 @@ def align_ctc(
                 if positive_ratio < 1.0:
                     updated["warnings"].append("CTC produced zero-duration token; using interpolation")
             output.append(updated)
+            completed += 1
             if progress:
-                progress((index + 1) / max(1, len(alignable)), f"aligned line {index + 1}/{len(lines)}")
+                progress(completed / max(1, len(alignable)), f"aligned line {completed}/{len(alignable)}")
     return output

@@ -49,7 +49,10 @@ class AlignmentConfig:
     """Policy and resource configuration for :func:`prepare_song`."""
 
     models: ModelPaths = field(default_factory=ModelPaths)
-    g2p_backend: str = "openjtalk"
+    # Sudachi gives canonical kana and token boundaries, which are useful for
+    # both CTC input and the optional pronunciation overlay.  OpenJTalk and
+    # pykakasi remain available when a caller prefers their conventions.
+    g2p_backend: str = "sudachi"
     device: str = "cpu"
     ffmpeg_path: str = "ffmpeg"
     demucs_model_name: str = "htdemucs"

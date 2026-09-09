@@ -17,6 +17,8 @@ The input directory must contain:
 
 The validator rejects missing files, malformed JSON, non-object timeline
 entries, negative timestamps, and intervals whose end precedes their start.
+Timeline entries must be sorted by `start_ms`; zero-length lyric intervals are
+accepted as anchors but do not receive interpolated mora intervals.
 
 ## Resources
 
@@ -97,6 +99,10 @@ character-level certainty.
 Downstream applications should consume the schema rather than import a model
 adapter. A failed enhanced stage can therefore leave the original timeline
 usable while preserving any successfully generated stem files.
+
+For renderer integration, `lyric_align.load_alignment(path)` returns a
+schema-validated `AlignmentArtifact`, or `None` for a missing/invalid file so a
+caller can fall back to the legacy sentence-level timeline.
 
 Preparation is stage-cacheable. A completed `alignment.json` is reused when
 the audio/lyrics hashes and full configuration signature match. A completed

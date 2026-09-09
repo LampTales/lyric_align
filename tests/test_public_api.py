@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from lyric_align import AlignmentConfig, AlignmentArtifact, ModelPaths, prepare_song, validate_song
+from lyric_align import AlignmentConfig, AlignmentArtifact, ModelPaths, load_alignment, prepare_song, validate_song
 from lyric_align.exceptions import InputValidationError
 from lyric_align.g2p import build_surface_spans
 from lyric_align.stages import _repair_token_spans
@@ -21,6 +21,9 @@ def make_song(tmp_path: Path) -> Path:
 
 
 class PublicApiTests(unittest.TestCase):
+    def test_default_reading_backend_is_sudachi(self):
+        self.assertEqual(AlignmentConfig().g2p_backend, "sudachi")
+
     def test_validate_and_prepare_without_model_paths(self):
         import lyric_align.pipeline as pipeline
         import tempfile
@@ -45,6 +48,38 @@ class PublicApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(InputValidationError):
                 validate_song(Path(directory) / "missing")
+
+    def test_prepare_rejects_malformed_timeline_with_public_error(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            song = make_song(Path(directory))
+            (song / "lyrics_timeline.json").write_text(json.dumps([1]), encoding="utf-8")
+            with self.assertRaises(InputValidationError):
+                prepare_song(song, config=AlignmentConfig(enable_offset=False))
+
+    def test_zero_duration_line_does_not_create_out_of_bounds_mora(self):
+        import lyric_align.pipeline as pipeline
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            song = make_song(Path(directory))
+            (song / "lyrics_timeline.json").write_text(json.dumps([
+                {"text": "夏です", "start_ms": 100, "end_ms": 100},
+            ], ensure_ascii=False), encoding="utf-8")
+            original = pipeline.convert
+            pipeline.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
+            try:
+                artifact = prepare_song(song, config=AlignmentConfig(enable_offset=False))
+            finally:
+                pipeline.convert = original
+            self.assertEqual(artifact.lines[0].mora, [])
+
+    def test_load_alignment_returns_none_for_missing_or_invalid_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "alignment.json"
+            self.assertIsNone(load_alignment(path))
+            path.write_text("{}", encoding="utf-8")
+            self.assertIsNone(load_alignment(path))
 
     def test_resource_paths_and_formats_are_independent(self):
         config = AlignmentConfig(
@@ -97,6 +132,16 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual(tokens[0]["start_ms"], 100)
         self.assertEqual(tokens[-1]["end_ms"], 300)
         self.assertTrue(all(tokens[i]["start_ms"] >= tokens[i - 1]["end_ms"] for i in range(1, len(tokens))))
+
+    def test_ctc_alignment_returns_quality_failure_for_empty_or_short_windows(self):
+        import torch
+        from lyric_align.stages import _forced_align
+        empty, empty_score = _forced_align(torch.empty((0, 4)), [1], 0)
+        short, short_score = _forced_align(torch.zeros((1, 4)), [1, 2], 0)
+        self.assertEqual(empty, [(0, 0)])
+        self.assertEqual(short, [(0, 0), (0, 0)])
+        self.assertLess(empty_score, -1e8)
+        self.assertLess(short_score, -1e8)
 
     def test_ctc_can_reuse_persisted_vocal_stem(self):
         import tempfile

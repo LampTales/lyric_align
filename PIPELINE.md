@@ -49,7 +49,8 @@ lyric_align/
 
 ### 4.1 后端模式
 
-`AlignmentConfig.g2p_backend`（以及 CLI 的 `--g2p-backend`）支持：
+`AlignmentConfig.g2p_backend`（以及 CLI 的 `--g2p-backend`）支持，默认使用
+`sudachi`：
 
 - `pykakasi`：轻量、适合快速假名和罗马音；
 - `sudachi`：提供词边界和 UniDic 读音；
@@ -91,7 +92,10 @@ python prepare_reading.py --backend openjtalk --out results/reading_openjtalk
 "timing": {"original_start_ms": 33330, "global_offset_ms": -420, "start_ms": 32910}
 ```
 
-只有当最佳候选明显优于 0 ms 且具有稳定峰值时才自动应用；否则保留 `global_offset_ms=0` 并标记 `offset_status="uncertain"`。
+只有当最佳候选相对 0 ms 的增益至少为 `0.08`、相对相邻搜索点的局部峰值突出度至少为
+`0.01`，且没有落在搜索边界时才自动应用；否则保留
+`global_offset_ms=0` 并标记 `offset_status="uncertain"`。这是面向无人值守 KTV
+队列的保守启发式门控，不是统计学显著性检验。
 
 `apply_offset.py` 可把候选偏移写入独立的修正时间轴，永远不覆盖 `lyrics_timeline.json`：
 
@@ -233,7 +237,9 @@ backend image
 | wav2vec2 CTC（8 句） | 约 4.8 s（含模型加载） | 模型常驻后更快 |
 | wav2vec2 CTC（整首 36 句） | 约 10–30 s 量级 | 是，可按句窗口缓存 |
 
-耗时大头是 Demucs，其次是 CTC 推理；G2P 和能量分析可以忽略不计。当前 `ctc_align.py` 每次命令都会重新加载约 1.3 GB 模型，服务化时应让模型常驻进程并批量处理句窗口。
+耗时大头是 Demucs，其次是 CTC 推理；G2P 和能量分析可以忽略不计。当前库 API
+会在进程内缓存 Demucs 和 CTC 模型；修改模型文件或 device 后调用
+`lyric_align.clear_model_cache()`。服务化时仍建议让模型常驻进程并批量处理句窗口。
 
 ## 11. 混合语言和非演唱行
 

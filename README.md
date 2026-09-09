@@ -40,6 +40,10 @@ The separate fields are intentional: a future backend can add another model
 path without forcing users to merge unrelated model directories. FFmpeg is a
 system executable (`ffmpeg_path`), not a Python or model dependency.
 
+The default reading backend is Sudachi: it keeps canonical kana and token
+boundaries suitable for both CTC input and pronunciation overlays. OpenJTalk
+and pykakasi remain available as explicit alternatives.
+
 The CLI exposes the same controls as the Python API. For example, search and
 quality thresholds can be adjusted without editing code:
 
@@ -53,8 +57,9 @@ python -m lyric_align.cli prepare --song-dir samples/<song> \
   --instrumental-bitrate 320k
 ```
 
-In a long-running KTV worker, model objects may be loaded once and reused by
-the caller; `prepare_song()` itself does not impose a model-lifetime policy.
+In a long-running KTV worker, CTC and Demucs model objects are cached in the
+process and reused across calls. Call `lyric_align.clear_model_cache()` after
+changing model files or device configuration.
 
 For a compact persistent output, the default Demucs policy keeps only an
 `instrumental.mp3` at 320 kbps; the vocal stem is temporary unless

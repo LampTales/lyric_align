@@ -45,6 +45,16 @@ def _load_artifact(path: Path) -> AlignmentArtifact | None:
         return None
 
 
+def load_alignment(path: str | Path) -> AlignmentArtifact | None:
+    """Load a previously generated alignment artifact for a renderer.
+
+    A missing or invalid file returns ``None`` so callers can keep the legacy
+    sentence-level rendering path without having to duplicate JSON/error
+    handling.  The returned object is schema-validated by ``from_dict``.
+    """
+    return _load_artifact(Path(path))
+
+
 def _load_preprocessing(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -60,9 +70,16 @@ def _stage_done(artifact: AlignmentArtifact | None, name: str, signature: str) -
 def validate_song(song_dir: str | Path) -> dict[str, Any]:
     """Validate the public input contract and return discovered input paths."""
     files = validate_song_directory(Path(song_dir))
+    try:
+        metadata = json.loads(files["metadata"].read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise InputValidationError(f"invalid metadata JSON: {files['metadata']}") from exc
+    if not isinstance(metadata, dict):
+        raise InputValidationError("metadata.json must contain a JSON object")
     timeline = json.loads(files["timeline"].read_text(encoding="utf-8"))
     if not isinstance(timeline, list):
         raise InputValidationError("lyrics_timeline.json must contain a JSON array")
+    previous_start = -1
     for index, row in enumerate(timeline):
         if not isinstance(row, dict):
             raise InputValidationError(f"timeline item {index} is not an object")
@@ -72,14 +89,17 @@ def validate_song(song_dir: str | Path) -> dict[str, Any]:
             raise InputValidationError(f"timeline item {index} has invalid times") from exc
         if start < 0 or end < start:
             raise InputValidationError(f"timeline item {index} has invalid interval")
+        if start < previous_start:
+            raise InputValidationError("lyrics_timeline.json must be sorted by start_ms")
+        previous_start = start
     return {name: str(path) for name, path in files.items()}
 
 
 def _timed_mora(reading: str, start: int, end: int) -> list[dict[str, Any]]:
     values = split_mora(reading)
-    if not values:
+    if not values or end <= start:
         return []
-    duration = max(1, end - start)
+    duration = end - start
     return [
         {
             "text": value,
@@ -92,6 +112,7 @@ def _timed_mora(reading: str, start: int, end: int) -> list[dict[str, Any]]:
 
 
 def build_reading_lines(song_dir: Path, config: AlignmentConfig) -> list[AlignmentLine]:
+    validate_song(song_dir)
     files = validate_song_directory(song_dir)
     timeline = json.loads(files["timeline"].read_text(encoding="utf-8"))
     lines: list[AlignmentLine] = []
@@ -192,9 +213,17 @@ def prepare_song(
             if candidate.is_file():
                 stem_paths["vocals"] = str(candidate.relative_to(song_dir))
     offset_audio = song_dir / stem_paths["vocals"] if stem_paths.get("vocals") else files["audio"]
-    if config.enable_offset and line_values:
+    offset_lines = [
+        line for line in line_values
+        if line.get("status") != "non_sung" and line.get("reading")
+    ]
+    if config.enable_offset and offset_lines:
         try:
-            offset = estimate_offset(offset_audio, [int(line["start_ms"]) for line in line_values], config)
+            offset = estimate_offset(
+                offset_audio,
+                [int(line["start_ms"]) for line in offset_lines],
+                config,
+            )
         except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
             # Offset correction is an enhancement; malformed/unavailable audio
             # must not prevent generation of the reading baseline.

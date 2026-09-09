@@ -18,7 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     prepare = sub.add_parser("prepare", help="build alignment.json")
     prepare.add_argument("--song-dir", type=Path, required=True)
     prepare.add_argument("--output", type=Path)
-    prepare.add_argument("--g2p-backend", choices=("openjtalk", "sudachi", "pykakasi"), default="openjtalk")
+    prepare.add_argument("--g2p-backend", choices=("openjtalk", "sudachi", "pykakasi"), default="sudachi")
     prepare.add_argument("--demucs-model-path", type=Path)
     prepare.add_argument("--demucs-model-name", default="htdemucs")
     prepare.add_argument("--ctc-model-path", type=Path)
