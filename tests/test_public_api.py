@@ -4,6 +4,7 @@ from pathlib import Path
 from lyric_align import AlignmentConfig, AlignmentArtifact, ModelPaths, load_alignment, prepare_song, validate_song
 from lyric_align.exceptions import InputValidationError
 from lyric_align.g2p import build_surface_spans
+from lyric_align.pipeline import _build_display_units
 from lyric_align.stages import _repair_token_spans
 import unittest
 
@@ -40,6 +41,9 @@ class PublicApiTests(unittest.TestCase):
                 pipeline.convert = original
             self.assertTrue((song / "alignment.json").exists())
             self.assertTrue(artifact.lines[0].mora)
+            self.assertIsNotNone(artifact.lines[0].original_start_ms)
+            self.assertIsNotNone(artifact.lines[0].original_end_ms)
+            self.assertEqual(len(artifact.lines[0].display_units), len(artifact.lines[0].text))
             self.assertEqual(artifact.lines[1].status, "non_sung")
             self.assertEqual(AlignmentArtifact.from_dict(json.loads((song / "alignment.json").read_text(encoding="utf-8"))).schema_version, 1)
 
@@ -142,6 +146,42 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual(short, [(0, 0), (0, 0)])
         self.assertLess(empty_score, -1e8)
         self.assertLess(short_score, -1e8)
+
+    def test_display_units_follow_final_mora_without_out_of_bounds_times(self):
+        import tempfile
+        import lyric_align.pipeline as pipeline
+        with tempfile.TemporaryDirectory() as directory:
+            song = make_song(Path(directory))
+            original = pipeline.convert
+            pipeline.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
+            try:
+                artifact = prepare_song(song, config=AlignmentConfig(enable_offset=False))
+            finally:
+                pipeline.convert = original
+            line = artifact.lines[0]
+            self.assertEqual("".join(item["text"] for item in line.display_units), line.text)
+            self.assertTrue(all(line.start_ms <= item["start_ms"] <= item["end_ms"] <= line.end_ms for item in line.display_units))
+
+    def test_display_units_repair_g2p_ctc_index_mismatch(self):
+        # CTC may omit a reading symbol (for example a Latin fragment), so a
+        # surface span can refer to a mora index beyond the shorter CTC list.
+        line = {
+            "text": "甲乙丙丁",
+            "start_ms": 0,
+            "end_ms": 1000,
+            "mora": [
+                {"text": "か", "start_ms": 100, "end_ms": 200},
+                {"text": "き", "start_ms": 500, "end_ms": 600},
+            ],
+            "surface_spans": [
+                {"surface_start": 0, "surface_end": 1, "reading": "か", "mora_indices": [1]},
+                {"surface_start": 3, "surface_end": 4, "reading": "と", "mora_indices": [3]},
+            ],
+            "warnings": [],
+        }
+        units = _build_display_units(line)
+        assert [item["start_ms"] for item in units] == sorted(item["start_ms"] for item in units)
+        assert "display unit timing repaired for monotonicity" in line["warnings"]
 
     def test_ctc_can_reuse_persisted_vocal_stem(self):
         import tempfile

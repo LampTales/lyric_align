@@ -32,7 +32,7 @@ def _stage_signature(config: AlignmentConfig, stage: str) -> str:
     elif stage == "demucs":
         values = {"demucs_model_name": config.demucs_model_name, "demucs_model_path": str(config.models.demucs_model_path) if config.models.demucs_model_path else None, "device": config.device, "keep_vocals": config.keep_vocals, "keep_instrumental": config.keep_instrumental, "vocals_format": config.vocals_format, "instrumental_format": config.instrumental_format, "vocals_bitrate": config.vocals_bitrate, "instrumental_bitrate": config.instrumental_bitrate}
     elif stage == "ctc":
-        values = {"ctc_model_path": str(config.models.ctc_model_path) if config.models.ctc_model_path else None, "device": config.device, "sample_rate": config.sample_rate, "ctc_margin_ms": config.ctc_margin_ms, "ctc_score_threshold": config.ctc_score_threshold, "pipeline_version": config.pipeline_version}
+        values = {"ctc_model_path": str(config.models.ctc_model_path) if config.models.ctc_model_path else None, "device": config.device, "sample_rate": config.sample_rate, "ctc_margin_ms": config.ctc_margin_ms, "ctc_activity_margin_ms": config.ctc_activity_margin_ms, "activity_confidence_threshold": config.activity_confidence_threshold, "ctc_score_threshold": config.ctc_score_threshold, "pipeline_version": config.pipeline_version}
     else:
         values = config.as_dict()
     payload = json.dumps(values, ensure_ascii=False, sort_keys=True).encode()
@@ -112,6 +112,89 @@ def _timed_mora(reading: str, start: int, end: int) -> list[dict[str, Any]]:
     ]
 
 
+def _build_display_units(line: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build the renderer-facing per-character timing contract.
+
+    ``tokens`` and ``mora`` describe model internals and may be replaced by a
+    fallback policy.  This function snapshots the selected final timing into
+    units tied to displayed surface characters, so KTV never has to infer a
+    second timeline.  Ambiguous multi-kanji spans are divided over their
+    assigned mora, which is deterministic and keeps every glyph visible.
+    """
+    text = str(line.get("text") or "")
+    if not text:
+        return []
+    start, end = int(line.get("start_ms", 0)), int(line.get("end_ms", 0))
+    spans = line.get("surface_spans") or []
+    mora = line.get("mora") or []
+    units: list[dict[str, Any]] = []
+    previous_start = start
+    order_repaired = False
+    for index, char in enumerate(text):
+        indices: list[int] = []
+        for span in spans:
+            a, b = int(span.get("surface_start", 0)), int(span.get("surface_end", 0))
+            if a <= index < b:
+                values = [int(value) for value in (span.get("mora_indices") or []) if 0 <= int(value) < len(mora)]
+                if values:
+                    offset, count = index - a, max(1, b - a)
+                    lo = round(len(values) * offset / count)
+                    hi = round(len(values) * (offset + 1) / count)
+                    if hi <= lo:
+                        hi = min(len(values), lo + 1)
+                    indices = values[lo:hi] or [values[min(lo, len(values) - 1)]]
+                break
+        if not indices and mora:
+            indices = [min(len(mora) - 1, int(index * len(mora) / max(1, len(text))))]
+        if indices:
+            a = min(int(mora[i].get("start_ms", start)) for i in indices)
+            b = max(int(mora[i].get("end_ms", end)) for i in indices)
+        else:
+            a = start + round((end - start) * index / max(1, len(text)))
+            b = start + round((end - start) * (index + 1) / max(1, len(text)))
+        a, b = max(start, min(end, a)), max(start, min(end, b))
+        # Surface spans are indexed against the complete G2P reading, while
+        # CTC can omit symbols that are absent from its vocabulary (Latin
+        # fragments are a common example).  In that case a span's original
+        # mora indices no longer line up with the shorter CTC mora list and
+        # the naive proportional fallback can move backwards in time.  Keep
+        # the final display contract monotonic and retain at least one frame
+        # for a displaced character.
+        if a < previous_start:
+            order_repaired = True
+            # Prefer the character's sentence-relative position over a stale
+            # CTC mora index. This gives an omitted final symbol a useful
+            # interval instead of collapsing it to a 1 ms sliver.
+            interpolated_a = start + round((end - start) * index / max(1, len(text)))
+            interpolated_b = start + round((end - start) * (index + 1) / max(1, len(text)))
+            a = max(previous_start, interpolated_a)
+            b = max(b, interpolated_b, a + 1)
+        if b < a:
+            order_repaired = True
+            b = a
+        b = min(end, b)
+        if b < a:
+            a = b = end
+        span = next((item for item in spans if int(item.get("surface_start", 0)) <= index < int(item.get("surface_end", 0))), {})
+        unit_reading = "".join(str(mora[i].get("text") or "") for i in indices) if indices else str(span.get("reading") or "")
+        units.append({
+            "text": char,
+            "surface_index": index,
+            "start_ms": a,
+            "end_ms": max(a, b),
+            "mora_indices": indices,
+            "reading": unit_reading if char.strip() else "",
+            "romaji": romaji(unit_reading) if char.strip() else "",
+        })
+        previous_start = a
+    if order_repaired:
+        warnings = line.setdefault("warnings", [])
+        message = "display unit timing repaired for monotonicity"
+        if message not in warnings:
+            warnings.append(message)
+    return units
+
+
 def _apply_timing_policy(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Choose a trustworthy character-time source before writing the artifact."""
     for line in lines:
@@ -125,9 +208,13 @@ def _apply_timing_policy(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
         warnings = [str(value) for value in (line.get("warnings") or [])]
         repaired = any("zero-duration" in value for value in warnings)
         status = line.get("alignment_status") or line.get("status")
-        if status == "ctc" and not repaired:
-            source = "ctc_rescaled" if bounded_end < end else "ctc"
-            if bounded_end < end:
+        # A repaired CTC path is still model timing.  The repair is local to
+        # collapsed symbols; discarding the complete line here was the main
+        # reason the observed CTC acceptance rate was unexpectedly low.
+        if status == "ctc":
+            bounded_by_ctc = str((line.get("ctc_window") or {}).get("source") or "") == "activity_bounds"
+            source = "ctc" if bounded_by_ctc or bounded_end >= end else "ctc_rescaled"
+            if bounded_end < end and not bounded_by_ctc:
                 factor = (bounded_end - start) / max(1, end - start)
                 for item in line.get("tokens") or []:
                     a, b = int(item.get("start_ms", start)), int(item.get("end_ms", end))
@@ -278,8 +365,10 @@ def prepare_song(
     # the effective values consumed by renderers; ``original_*`` always refer
     # to the timestamps from lyrics_timeline.json.
     for line in line_values:
-        line.setdefault("original_start_ms", int(line["start_ms"]))
-        line.setdefault("original_end_ms", int(line["end_ms"]))
+        if line.get("original_start_ms") is None:
+            line["original_start_ms"] = int(line["start_ms"])
+        if line.get("original_end_ms") is None:
+            line["original_end_ms"] = int(line["end_ms"])
     if global_offset:
         for line in line_values:
             line["start_ms"] = max(0, int(line["start_ms"]) + global_offset)
@@ -323,6 +412,8 @@ def prepare_song(
                     pass
                 stem_paths["vocals"] = None
     line_values = _apply_timing_policy(line_values)
+    for line in line_values:
+        line["display_units"] = _build_display_units(line)
     allowed = set(AlignmentLine.__dataclass_fields__)
     final_lines = []
     for line in line_values:

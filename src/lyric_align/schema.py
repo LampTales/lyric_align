@@ -33,6 +33,7 @@ class AlignmentLine:
     original_start_ms: int | None = None
     original_end_ms: int | None = None
     singing_end_ms: int | None = None
+    singing_start_ms: int | None = None
     activity_confidence: float | None = None
     status: str = "unresolved"
     method: str = ""
@@ -44,6 +45,10 @@ class AlignmentLine:
     tokens: list[dict[str, Any]] = field(default_factory=list)
     mora: list[dict[str, Any]] = field(default_factory=list)
     surface_spans: list[dict[str, Any]] = field(default_factory=list)
+    # Final renderer contract.  These units are the only character timing
+    # values a consumer should use; tokens/mora remain diagnostic/model data.
+    display_units: list[dict[str, Any]] = field(default_factory=list)
+    ctc_window: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
     def validate(self) -> None:
@@ -59,6 +64,10 @@ class AlignmentLine:
             raise ValueError("coverage must be between 0 and 1")
         if self.singing_end_ms is not None and not self.start_ms <= int(self.singing_end_ms) <= self.end_ms:
             raise ValueError("singing_end_ms must be inside its line interval")
+        if self.singing_start_ms is not None and not self.start_ms <= int(self.singing_start_ms) <= self.end_ms:
+            raise ValueError("singing_start_ms must be inside its line interval")
+        if self.singing_start_ms is not None and self.singing_end_ms is not None and self.singing_start_ms > self.singing_end_ms:
+            raise ValueError("singing_start_ms must not exceed singing_end_ms")
         if self.activity_confidence is not None and not 0.0 <= float(self.activity_confidence) <= 1.0:
             raise ValueError("activity_confidence must be between 0 and 1")
         if self.confidence is not None and not 0.0 <= float(self.confidence) <= 1.0:
@@ -75,6 +84,14 @@ class AlignmentLine:
             start, end = int(item["start_ms"]), int(item["end_ms"])
             if start < self.start_ms or end < start or end > self.end_ms:
                 raise ValueError("CTC token time must be inside its line interval")
+        previous = self.start_ms
+        for item in self.display_units:
+            start, end = int(item["start_ms"]), int(item["end_ms"])
+            if start < self.start_ms or end < start or end > self.end_ms:
+                raise ValueError("display unit time must be inside its line interval")
+            if start < previous:
+                raise ValueError("display unit times must be monotonic")
+            previous = start
 
 
 @dataclass

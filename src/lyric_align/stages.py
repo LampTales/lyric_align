@@ -344,8 +344,24 @@ def align_ctc(
                 output.append(line)
                 continue
             start, end = int(line["start_ms"]), int(line["end_ms"])
-            left = max(0, int((start - config.ctc_margin_ms) * config.sample_rate / 1000))
-            right = min(len(audio), int((end + config.ctc_margin_ms) * config.sample_rate / 1000))
+            confidence = float(line.get("activity_confidence") or 0.0)
+            activity_start = line.get("singing_start_ms")
+            activity_end = line.get("singing_end_ms")
+            bounded = (
+                activity_start is not None and activity_end is not None
+                and confidence >= config.activity_confidence_threshold
+                and int(activity_start) < int(activity_end)
+            )
+            if bounded:
+                window_start = max(start, int(activity_start) - config.ctc_activity_margin_ms)
+                window_end = min(end, int(activity_end) + config.ctc_activity_margin_ms)
+                window_source = "activity_bounds"
+            else:
+                window_start, window_end = start, end
+                window_source = "line_bounds"
+            search_margin = 0 if bounded else config.ctc_margin_ms
+            left = max(0, int((window_start - search_margin) * config.sample_rate / 1000))
+            right = min(len(audio), int((window_end + search_margin) * config.sample_rate / 1000))
             segment = audio[left:right]
             inputs = processor(segment, sampling_rate=config.sample_rate, return_tensors="pt")
             logits = model(inputs.input_values.to(config.device)).logits[0]
@@ -362,11 +378,12 @@ def align_ctc(
                 token_end = max(token_start, min(end, raw_end))
                 confidence = log_probs[a:b, vocab[char]].mean().item() if b > a else -99.0
                 tokens.append({"text": char, "start_ms": token_start, "end_ms": token_end, "frame_confidence": round(float(confidence), 3)})
-            tokens, repaired = _repair_token_spans(tokens, start, end)
+            tokens, repaired = _repair_token_spans(tokens, window_start, window_end)
             coverage = len(tokens) / max(1, len(str(line["reading"])))
             updated = dict(line)
             updated["ctc_score"] = round(score, 4)
             updated["tokens"] = tokens
+            updated["ctc_window"] = {"start_ms": window_start, "end_ms": window_end, "source": window_source}
             positive_ratio = sum(int(item["end_ms"] > item["start_ms"]) for item in tokens) / max(1, len(tokens))
             updated["alignment_status"] = "ctc" if coverage >= 0.8 and score >= config.ctc_score_threshold and positive_ratio >= 1.0 else "fallback"
             if updated["alignment_status"] == "ctc":

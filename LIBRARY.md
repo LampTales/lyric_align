@@ -79,7 +79,8 @@ conversion.
 - `schema_version`: currently `1`;
 - `inputs`: relative source filenames and SHA-256 hashes;
 - `timing`: global offset and its status;
-- `lines`: source text, reading, romaji, mora intervals, status and warnings;
+- `lines`: source text, reading, romaji, final `display_units`, mora diagnostics,
+  vocal activity bounds, status and warnings;
 - `stages`: per-stage status and diagnostics;
 - `models`: the independently supplied resource paths/provenance;
 - `artifacts`: relative stem and preprocessing paths, or `null` when absent.
@@ -95,6 +96,14 @@ to a reading substring, generated romaji and the corresponding mora indices.
 Ambiguous kanji mappings are retained as a word-level span with
 `mapping_confidence="low"` rather than being presented as a false
 character-level certainty.
+
+`display_units` is the renderer contract: one item per displayed character,
+with `start_ms`/`end_ms`, reading, romaji and `mora_indices`. Consumers should
+use these final units for sweep timing and pronunciation placement. `tokens`
+and `mora` are retained for diagnostics and must not be rescaled downstream.
+When activity detection is confident, `singing_start_ms` and
+`singing_end_ms` bound the CTC search window; otherwise CTC records
+`ctc_window.source="line_bounds"` and uses the sentence interval.
 
 Downstream applications should consume the schema rather than import a model
 adapter. A failed enhanced stage can therefore leave the original timeline
@@ -121,3 +130,12 @@ the quality gate, the library repairs such collapsed spans by a deterministic
 duration-weighted partition of the sentence interval and records a warning on
 the line. This keeps cumulative karaoke highlighting continuous without
 claiming additional acoustic evidence.
+
+### Temporary test data
+
+Disposable song copies, stems, intermediate JSON, logs, and preview renders
+created during development belong under `lyric_align/temp/`, preferably in a
+named run directory such as `lyric_align/temp/run-YYYY-MM-DD/`. The directory
+is ignored by Git and should be cleaned after a test. Do not use the global
+`/private/tmp` directory for project data; it is shared with unrelated tools
+and makes stale model outputs difficult to identify.

@@ -19,3 +19,8 @@ checkpoints/
 # Local regression samples are intentionally kept outside Git.
 # They are copied from the original repository and may contain large media.
 samples/
+
+# Scratch copies, model intermediates and test outputs. Keep the directory
+# itself documented, but never commit its contents.
+temp/*
+!temp/README.md

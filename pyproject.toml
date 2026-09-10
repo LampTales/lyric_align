@@ -8,7 +8,10 @@ version = "0.1.0"
 description = "Model-assisted lyric reading and singing-time alignment"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+# Activity/offset modules are part of the public pipeline and import numpy at
+# module load time. Keep this small dependency in the base install; heavyweight
+# model runtimes remain optional below.
+dependencies = ["numpy>=1.24,<3"]
 
 [project.optional-dependencies]
 japanese = ["pykakasi>=2.3", "sudachipy>=0.6", "sudachidict-core"]

@@ -26,7 +26,7 @@ def estimate_voice_endings(
     hop_ms: int = 50,
     window_ms: int = 100,
 ) -> list[dict[str, Any]]:
-    """Annotate lines with conservative vocal end points.
+    """Annotate lines with conservative vocal start/end points.
 
     This is intentionally an activity detector, not an ASR system.  It uses
     the Demucs vocal stem, an adaptive energy threshold and a short run-length
@@ -70,13 +70,15 @@ def estimate_voice_endings(
         indices = np.flatnonzero(active)
         if not len(indices):
             continue
-        last = int(indices[-1])
+        first, last = int(indices[0]), int(indices[-1])
+        detected_start = max(start, start + first * hop_ms - 80)
         detected = min(end, start + (last + 1) * hop_ms + 120)
         # A detector result very close to the source boundary is not useful;
         # preserve the original end and mark confidence as low.
         confidence = max(0.0, min(1.0, (peak - threshold) / max(peak, 1e-6)))
         if end - detected < 250:
             detected = end
+        line["singing_start_ms"] = int(detected_start)
         line["singing_end_ms"] = int(detected)
         line["activity_confidence"] = round(confidence, 3)
     return annotated

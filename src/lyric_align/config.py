@@ -70,10 +70,15 @@ class AlignmentConfig:
     offset_step_ms: int = 40
     enable_offset: bool = True
     ctc_margin_ms: int = 500
+    # Activity endpoints are used to narrow CTC only when the detector is
+    # sufficiently confident.  A small margin protects consonants at the
+    # boundary without feeding a whole silent/interlude window to CTC.
+    ctc_activity_margin_ms: int = 120
+    activity_confidence_threshold: float = 0.45
     ctc_score_threshold: float = -1.5
     # Bump when deterministic post-processing changes invalidate cached
     # alignment.json files (the current version includes CTC span repair).
-    pipeline_version: str = "0.5"
+    pipeline_version: str = "0.6"
 
     def __post_init__(self) -> None:
         if self.g2p_backend not in {"openjtalk", "sudachi", "pykakasi"}:
@@ -86,6 +91,10 @@ class AlignmentConfig:
             raise ValueError("offset_step_ms must be positive")
         if self.ctc_margin_ms < 0:
             raise ValueError("ctc_margin_ms must not be negative")
+        if self.ctc_activity_margin_ms < 0:
+            raise ValueError("ctc_activity_margin_ms must not be negative")
+        if not 0.0 <= float(self.activity_confidence_threshold) <= 1.0:
+            raise ValueError("activity_confidence_threshold must be between 0 and 1")
         if not math.isfinite(float(self.ctc_score_threshold)):
             raise ValueError("ctc_score_threshold must be finite")
         for name in ("vocals_format", "instrumental_format"):
@@ -112,6 +121,8 @@ class AlignmentConfig:
             },
             "enable_offset": self.enable_offset,
             "ctc_margin_ms": self.ctc_margin_ms,
+            "ctc_activity_margin_ms": self.ctc_activity_margin_ms,
+            "activity_confidence_threshold": self.activity_confidence_threshold,
             "ctc_score_threshold": self.ctc_score_threshold,
             "pipeline_version": self.pipeline_version,
             "models": self.models.as_dict(),

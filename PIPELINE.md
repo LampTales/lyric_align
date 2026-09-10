@@ -169,7 +169,8 @@ CTC 模型输入人声波形，输出每个声学帧对词表标签的概率。�
 - `mora` 按时间递增；相邻区间允许有空隙，不允许反向；
 - `chars` 可为空或多个字符，支持一个汉字对应多个 mora；
 - `surface_spans`（注音渲染必需）由 `build_reading_lines()` 生成，应覆盖原文中需要注音的字符；它与声学 `tokens` 是不同层级，不能互相替代；
-- 渲染器只依赖 `text`、`start_ms`、`end_ms` 和 `mora`，不需要理解模型 posterior。
+- 渲染器只依赖 `text`、`start_ms`、`end_ms` 和最终 `display_units`，不需要
+  理解模型 posterior，也不应再次按 `singing_end_ms` 缩放 token/mora。
 
 ## 7. 自动质量门控和回退
 
