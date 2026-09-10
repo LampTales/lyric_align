@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import AlignmentConfig
+from .activity import estimate_voice_endings
 from .exceptions import InputValidationError, StageUnavailableError
 from .g2p import NON_SUNG, build_surface_spans, convert, romaji, split_mora
 from .io import sha256_file, validate_song_directory, write_json_atomic
@@ -109,6 +110,47 @@ def _timed_mora(reading: str, start: int, end: int) -> list[dict[str, Any]]:
         }
         for index, value in enumerate(values)
     ]
+
+
+def _apply_timing_policy(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Choose a trustworthy character-time source before writing the artifact."""
+    for line in lines:
+        if not line.get("reading") or line.get("status") == "non_sung":
+            line["timing_source"] = "line_interpolation"
+            continue
+        start, end = int(line.get("start_ms", 0)), int(line.get("end_ms", 0))
+        singing_end = int(line.get("singing_end_ms") or end)
+        activity_ok = line.get("activity_confidence") is not None and float(line.get("activity_confidence") or 0) >= 0.35
+        bounded_end = max(start, min(end, singing_end)) if activity_ok else end
+        warnings = [str(value) for value in (line.get("warnings") or [])]
+        repaired = any("zero-duration" in value for value in warnings)
+        status = line.get("alignment_status") or line.get("status")
+        if status == "ctc" and not repaired:
+            source = "ctc_rescaled" if bounded_end < end else "ctc"
+            if bounded_end < end:
+                factor = (bounded_end - start) / max(1, end - start)
+                for item in line.get("tokens") or []:
+                    a, b = int(item.get("start_ms", start)), int(item.get("end_ms", end))
+                    item["start_ms"] = start + round((a - start) * factor)
+                    item["end_ms"] = start + round((b - start) * factor)
+                for item in line.get("mora") or []:
+                    a, b = int(item.get("start_ms", start)), int(item.get("end_ms", end))
+                    item["start_ms"] = start + round((a - start) * factor)
+                    item["end_ms"] = start + round((b - start) * factor)
+            line["timing_source"] = source
+            continue
+        if activity_ok:
+            line["mora"] = _timed_mora(str(line.get("reading") or ""), start, bounded_end)
+            line["timing_source"] = "activity_interpolation"
+            if repaired and "CTC timing replaced by activity-bounded interpolation" not in warnings:
+                warnings.append("CTC timing replaced by activity-bounded interpolation")
+        else:
+            line["mora"] = _timed_mora(str(line.get("reading") or ""), start, end)
+            line["timing_source"] = "line_interpolation"
+            if status == "fallback" and "activity endpoint unavailable; using line interpolation" not in warnings:
+                warnings.append("activity endpoint unavailable; using line interpolation")
+        line["warnings"] = warnings
+    return lines
 
 
 def build_reading_lines(song_dir: Path, config: AlignmentConfig) -> list[AlignmentLine]:
@@ -231,10 +273,15 @@ def prepare_song(
     else:
         offset = {"offset_ms": 0, "status": "disabled", "candidates": []}
     global_offset = int(offset.get("offset_ms") or 0)
+    # Keep the source timeline explicit even when the automatic offset gate
+    # decides that no correction is warranted.  ``start_ms``/``end_ms`` are
+    # the effective values consumed by renderers; ``original_*`` always refer
+    # to the timestamps from lyrics_timeline.json.
+    for line in line_values:
+        line.setdefault("original_start_ms", int(line["start_ms"]))
+        line.setdefault("original_end_ms", int(line["end_ms"]))
     if global_offset:
         for line in line_values:
-            line["original_start_ms"] = line["start_ms"]
-            line["original_end_ms"] = line["end_ms"]
             line["start_ms"] = max(0, int(line["start_ms"]) + global_offset)
             line["end_ms"] = max(line["start_ms"], int(line["end_ms"]) + global_offset)
             for mora in line.get("mora", []):
@@ -246,9 +293,28 @@ def prepare_song(
             raise StageUnavailableError("ctc stage requires a Demucs vocals output")
         stage_state["ctc"] = {"status": "running", "model": str(config.models.ctc_model_path)}
         try:
-            ctc_lines = align_ctc(song_dir / vocal, line_values, config, lambda fraction, message: progress("ctc", fraction, message) if progress else None)
-            line_values = ctc_lines
-            stage_state["ctc"] = {"status": "done", "model": str(config.models.ctc_model_path), "signature": _stage_signature(config, "ctc")}
+            if progress:
+                progress("activity", 0.0, "detecting vocal end points")
+            try:
+                line_values = estimate_voice_endings(
+                    song_dir / vocal,
+                    line_values,
+                    ffmpeg_path=config.ffmpeg_path,
+                    sample_rate=config.sample_rate,
+                )
+            except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError):
+                # Activity endpoints are an enhancement; CTC alignment remains
+                # usable when a stem cannot be decoded for this diagnostic.
+                pass
+            try:
+                ctc_lines = align_ctc(song_dir / vocal, line_values, config, lambda fraction, message: progress("ctc", fraction, message) if progress else None)
+                line_values = ctc_lines
+                stage_state["ctc"] = {"status": "done", "model": str(config.models.ctc_model_path), "signature": _stage_signature(config, "ctc")}
+            except Exception as exc:
+                # Keep a usable activity-bounded artifact when CTC itself is
+                # unavailable or fails globally.  The stage record preserves
+                # the diagnostic while rendering can continue with G2P+mora.
+                stage_state["ctc"] = {"status": "error", "model": str(config.models.ctc_model_path), "error": str(exc), "signature": _stage_signature(config, "ctc")}
         finally:
             if not config.keep_vocals:
                 try:
@@ -256,6 +322,7 @@ def prepare_song(
                 except FileNotFoundError:
                     pass
                 stem_paths["vocals"] = None
+    line_values = _apply_timing_policy(line_values)
     allowed = set(AlignmentLine.__dataclass_fields__)
     final_lines = []
     for line in line_values:

@@ -131,17 +131,23 @@ def _save_stem(tensor: Any, path: Path, sample_rate: int, config: AlignmentConfi
         if array.ndim == 1:
             array = array[None, :]
         interleaved = array.T.copy()
-        subprocess.run(
+        encoded = subprocess.run(
             [config.ffmpeg_path, "-v", "error", "-y", "-f", "f32le", "-ar", str(sample_rate), "-ac", str(array.shape[0]), "-i", "pipe:0", "-c:a", "pcm_s16le", str(wav)],
-            input=interleaved.tobytes(), check=True,
+            input=interleaved.tobytes(), check=False, capture_output=True,
         )
+        if encoded.returncode:
+            detail = encoded.stderr.decode("utf-8", errors="replace").strip()[-600:]
+            raise RuntimeError(f"FFmpeg WAV stem encode failed: {detail or encoded.returncode}")
         if path.suffix.lower() == ".flac":
             codec_args = ["-codec:a", "flac", "-compression_level", "8"]
         elif path.suffix.lower() == ".wav":
             codec_args = ["-codec:a", "pcm_s16le"]
         else:
             codec_args = ["-codec:a", "libmp3lame", "-b:a", bitrate]
-        subprocess.run([config.ffmpeg_path, "-v", "error", "-y", "-i", str(wav), *codec_args, str(temporary)], check=True)
+        encoded = subprocess.run([config.ffmpeg_path, "-v", "error", "-y", "-i", str(wav), *codec_args, str(temporary)], check=False, capture_output=True)
+        if encoded.returncode:
+            detail = encoded.stderr.decode("utf-8", errors="replace").strip()[-600:]
+            raise RuntimeError(f"FFmpeg {path.suffix.lower().lstrip('.') or 'audio'} stem encode failed: {detail or encoded.returncode}")
         temporary.replace(path)
     finally:
         for candidate in (temporary, wav):

@@ -32,12 +32,15 @@ class AlignmentLine:
     end_ms: int = 0
     original_start_ms: int | None = None
     original_end_ms: int | None = None
+    singing_end_ms: int | None = None
+    activity_confidence: float | None = None
     status: str = "unresolved"
     method: str = ""
     confidence: float | None = None
     ctc_score: float | None = None
     coverage: float | None = None
     alignment_status: str | None = None
+    timing_source: str = "line_interpolation"
     tokens: list[dict[str, Any]] = field(default_factory=list)
     mora: list[dict[str, Any]] = field(default_factory=list)
     surface_spans: list[dict[str, Any]] = field(default_factory=list)
@@ -50,8 +53,14 @@ class AlignmentLine:
             raise ValueError(f"unsupported line status: {self.status}")
         if self.alignment_status not in _ALIGNMENT_STATUSES:
             raise ValueError(f"unsupported alignment status: {self.alignment_status}")
+        if self.timing_source not in {"ctc", "ctc_rescaled", "activity_interpolation", "line_interpolation"}:
+            raise ValueError(f"unsupported timing source: {self.timing_source}")
         if self.coverage is not None and not 0.0 <= float(self.coverage) <= 1.0:
             raise ValueError("coverage must be between 0 and 1")
+        if self.singing_end_ms is not None and not self.start_ms <= int(self.singing_end_ms) <= self.end_ms:
+            raise ValueError("singing_end_ms must be inside its line interval")
+        if self.activity_confidence is not None and not 0.0 <= float(self.activity_confidence) <= 1.0:
+            raise ValueError("activity_confidence must be between 0 and 1")
         if self.confidence is not None and not 0.0 <= float(self.confidence) <= 1.0:
             raise ValueError("confidence must be between 0 and 1")
         previous = self.start_ms
