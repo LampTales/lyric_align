@@ -1,6 +1,14 @@
-# lyric_align 实验目录
+# lyric_align
 
-完整的独立库输入/输出契约见 [LIBRARY.md](/Users/lamptales/remote/cloudmusic2ktv/lyric_align/LIBRARY.md)。
+这是可独立安装的模型歌词预处理库，也是 CloudMusic2KTV 实验性模型模式的
+唯一对齐实现。
+
+## 文档导航
+
+- 本文：安装、最小 Python/CLI 用法和本地实验入口；
+- [LIBRARY.md](LIBRARY.md)：稳定的输入、输出 schema 和调用契约；
+- [PIPELINE.md](PIPELINE.md)：reading、活动检测、Demucs、CTC、回退及时间语义；
+- [temp/README.md](temp/README.md)：临时测试数据位置和清理规则。
 
 ## Python library
 
@@ -67,13 +75,15 @@ For a compact persistent output, the default Demucs policy keeps only an
 completed Demucs stage using the input/config signatures recorded in
 `preprocessing.json`.
 
-输入/输出契约、时间语义、回退策略和生产接入边界见 [PIPELINE.md](/Users/lamptales/remote/cloudmusic2ktv/lyric_align/PIPELINE.md)。
+输入/输出契约、时间语义、回退策略和生产接入边界见 [PIPELINE.md](PIPELINE.md)。
 
 `samples/` 是从原项目 `local/outputs/` 复制的长期回归样本，不会随原仓库变化。
 
 样本目录仅用于本机长期回归，整个 `samples/` 已加入 `.gitignore`，不会进入 Git 提交。若要在另一台机器复现实验，需要另外准备这些样本文件。
 
-当前实验环境为 conda 的 `lyric`（Python 3.11），依赖清单见 [environment.yml](/Users/lamptales/remote/cloudmusic2ktv/lyric_align/environment.yml)。已经安装 `pykakasi`、SudachiPy/UniDic 和 `pyopenjtalk`；基线会优先使用 pykakasi，后续实验可直接比较其他后端。
+当前实验环境为 conda 的 `lyric`（Python 3.11），依赖清单见
+[environment.yml](environment.yml)。默认 G2P 后端是 `sudachi`；
+`openjtalk` 和 `pykakasi` 需要显式选择后端后使用。
 
 模型权重和声学中间文件统一放在当前目录的 `models/` 或 `artifacts/`，这两个目录已加入 `.gitignore`，不会进入 Git 提交。
 
@@ -83,7 +93,12 @@ Demucs 使用本地模型缓存时设置：
 export HF_HOME="$PWD/models/huggingface"
 ```
 
-## 运行无依赖基线
+## 离线实验脚本（非 KTV 生产路径）
+
+下面的脚本用于比较算法、生成诊断页面或复现实验结果；KTV 接入应使用
+`prepare_song()` 和 `alignment.json` 契约，不需要按顺序运行这些探针。
+
+### 运行无依赖基线
 
 ```bash
 conda activate lyric
@@ -113,7 +128,7 @@ ssh -N -L 8765:127.0.0.1:8765 user@server
 
 页面可以选择歌曲、播放音频，并观察当前句和 mora 的高亮。当前算法只是句级时间戳内等速插值；没有安装 G2P 时，汉字会显示为 `unresolved`，这是有意保留的失败标记。
 
-## 可选日语 G2P
+### 可选日语 G2P
 
 基线会自动探测 `pykakasi` 或 `pyopenjtalk`，但不会自动下载模型。安装其中一个后重新运行 `align_baseline.py` 即可比较文本侧结果：
 
@@ -123,7 +138,7 @@ python -m pip install pykakasi
 
 后续再单独加入 Sudachi/UniDic、Demucs 和 CTC 强制对齐，避免把大模型依赖和数据格式验证混在第一步。
 
-## 比较日语 G2P 后端
+### 比较日语 G2P 后端
 
 ```bash
 conda activate lyric
@@ -149,7 +164,7 @@ python prepare_reading.py --backend openjtalk
 
 单后端结果标记为 `single_backend`，会自动继续生成，不会阻塞手机端使用；`consensus` 仅用于离线比较和发现潜在歧义。
 
-## 句内活动窗口基线
+### 句内活动窗口基线
 
 ```bash
 python activity_baseline.py
@@ -168,7 +183,7 @@ python compare_vocal_activity.py samples/1851578144_東京事変_孔雀 \
 
 页面：<http://10.10.10.20:8765/results/vocal_activity/>。
 
-## CTC 对齐探针
+### CTC 对齐探针
 
 Demucs 人声 stem 准备好后，可以对一首歌的前几句运行 CTC 探针：
 
@@ -177,7 +192,7 @@ export HF_HOME="$PWD/models/huggingface"
 python ctc_align.py --max-lines 5
 ```
 
-结果写入 `results/ctc_probe.json`。该脚本只用于判断日语 wav2vec2 在歌声上的字符后验是否有用，尚未接入视频渲染，也不会自动替换现有时间轴。
+结果写入 `results/ctc_probe.json`。该脚本只用于判断日语 wav2vec2 在歌声上的字符后验是否有用；它是离线探针，不会替换正式时间轴。生产式接入由 `prepare_song()` 负责。
 
 本次 `孔雀` 前五句的浏览器检查页：<http://10.10.10.20:8765/results/ctc_probe.html>。
 
