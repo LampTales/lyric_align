@@ -101,6 +101,9 @@ character-level certainty.
 with `start_ms`/`end_ms`, reading, romaji and `mora_indices`. Consumers should
 use these final units for sweep timing and pronunciation placement. `tokens`
 and `mora` are retained for diagnostics and must not be rescaled downstream.
+Pronunciation fields are populated only for Japanese surface characters;
+Latin words and other scripts remain present in `text` but have empty
+`reading`/`romaji`, even when a G2P backend happens to transliterate them.
 When activity detection is confident, `singing_start_ms` and
 `singing_end_ms` bound the CTC search window; otherwise CTC records
 `ctc_window.source="line_bounds"` and uses the sentence interval.

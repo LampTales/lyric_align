@@ -12,7 +12,7 @@ from typing import Any, Callable
 from .config import AlignmentConfig
 from .activity import estimate_voice_endings
 from .exceptions import InputValidationError, StageUnavailableError
-from .g2p import NON_SUNG, build_surface_spans, convert, romaji, split_mora
+from .g2p import NON_SUNG, build_surface_spans, convert, is_japanese_char, romaji, split_mora
 from .io import sha256_file, validate_song_directory, write_json_atomic
 from .offset import estimate_offset
 from .schema import AlignmentArtifact, AlignmentLine, ArtifactPaths
@@ -177,14 +177,18 @@ def _build_display_units(line: dict[str, Any]) -> list[dict[str, Any]]:
             a = b = end
         span = next((item for item in spans if int(item.get("surface_start", 0)) <= index < int(item.get("surface_end", 0))), {})
         unit_reading = "".join(str(mora[i].get("text") or "") for i in indices) if indices else str(span.get("reading") or "")
+        # Keep pronunciation data only for Japanese surface characters.  G2P
+        # backends may transliterate Latin words into kana, but those words
+        # are not Japanese annotations and must remain blank in the artifact.
+        japanese_surface = is_japanese_char(char)
         units.append({
             "text": char,
             "surface_index": index,
             "start_ms": a,
             "end_ms": max(a, b),
             "mora_indices": indices,
-            "reading": unit_reading if char.strip() else "",
-            "romaji": romaji(unit_reading) if char.strip() else "",
+            "reading": unit_reading if char.strip() and japanese_surface else "",
+            "romaji": romaji(unit_reading) if char.strip() and japanese_surface else "",
         })
         previous_start = a
     if order_repaired:

@@ -77,8 +77,8 @@ class AlignmentConfig:
     activity_confidence_threshold: float = 0.45
     ctc_score_threshold: float = -1.5
     # Bump when deterministic post-processing changes invalidate cached
-    # alignment.json files (the current version includes CTC span repair).
-    pipeline_version: str = "0.6"
+    # alignment.json files (0.7 filters pronunciation on non-Japanese text).
+    pipeline_version: str = "0.7"
 
     def __post_init__(self) -> None:
         if self.g2p_backend not in {"openjtalk", "sudachi", "pykakasi"}:

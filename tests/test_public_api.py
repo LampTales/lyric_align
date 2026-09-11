@@ -183,6 +183,30 @@ class PublicApiTests(unittest.TestCase):
         assert [item["start_ms"] for item in units] == sorted(item["start_ms"] for item in units)
         assert "display unit timing repaired for monotonicity" in line["warnings"]
 
+    def test_display_units_do_not_attach_pronunciation_to_latin_surface_text(self):
+        line = {
+            "text": "かなABC",
+            "reading": "かなえーびーしー",
+            "start_ms": 0,
+            "end_ms": 600,
+            "mora": [
+                {"text": value, "start_ms": index * 75, "end_ms": (index + 1) * 75}
+                for index, value in enumerate(["か", "な", "え", "ー", "び", "ー", "し", "ー"])
+            ],
+            "surface_spans": [
+                {
+                    "surface_start": 0,
+                    "surface_end": 5,
+                    "reading": "かなえーびーしー",
+                    "mora_indices": list(range(8)),
+                }
+            ],
+        }
+        units = _build_display_units(line)
+        assert [item["text"] for item in units] == list("かなABC")
+        assert all(item["romaji"] for item in units[:2])
+        assert all(item["romaji"] == "" and item["reading"] == "" for item in units[2:])
+
     def test_ctc_can_reuse_persisted_vocal_stem(self):
         import tempfile
         import lyric_align.pipeline as pipeline

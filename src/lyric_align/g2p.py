@@ -17,6 +17,20 @@ def kata_to_hira(text: str) -> str:
     return "".join(chr(ord(char) - 0x60) if 0x30A1 <= ord(char) <= 0x30F6 else char for char in text)
 
 
+def is_japanese_char(char: str) -> bool:
+    """Return whether a displayed character belongs to Japanese script.
+
+    Latin text is sometimes transliterated by a G2P backend (for example an
+    English word may receive a kana reading).  The renderer must not mistake
+    that transliteration for a pronunciation annotation, so the decision is
+    based on the *surface* character rather than the generated reading.
+    """
+    if not char:
+        return False
+    value = char[0]
+    return bool(KANA.match(value) or "\u3400" <= value <= "\u9fff")
+
+
 def split_mora(reading: str) -> list[str]:
     result: list[str] = []
     latin: list[str] = []
@@ -177,6 +191,12 @@ def _surface_span(text: str, surface_start: int, surface_end: int, reading: str,
             continue
         mora_ranges.append((cursor, cursor + len(mora)))
     mora_indices = [index for index, (a, b) in enumerate(mora_ranges) if b > reading_start and a < reading_end]
+    # A mixed-language span cannot safely be rendered as one pronunciation
+    # annotation.  Character-level ``display_units`` apply the same filter
+    # below, while this keeps the legacy span fallback from painting English
+    # text with a Japanese reading.
+    visible = [char for char in value if char.strip()]
+    span_romaji = romaji(reading_value) if visible and all(is_japanese_char(char) for char in visible) else ""
     return {
         "surface": value,
         "surface_start": surface_start,
@@ -184,7 +204,7 @@ def _surface_span(text: str, surface_start: int, surface_end: int, reading: str,
         "reading": reading_value,
         "reading_start": reading_start,
         "reading_end": reading_end,
-        "romaji": romaji(reading_value),
+        "romaji": span_romaji,
         "mora_indices": mora_indices,
         "mapping_confidence": confidence,
     }
