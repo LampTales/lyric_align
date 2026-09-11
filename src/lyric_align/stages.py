@@ -61,14 +61,25 @@ def _group_ctc_mora(tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
             groups.append([token])
     result = []
     for group in groups:
-        result.append({
+        source_indices = sorted({
+            int(item["source_mora_index"])
+            for item in group
+            if item.get("source_mora_index") is not None
+        })
+        value = {
             "text": "".join(str(item.get("text") or "") for item in group),
             "start_ms": min(int(item["start_ms"]) for item in group),
             "end_ms": max(int(item["end_ms"]) for item in group),
             "frame_confidence": round(sum(float(item.get("frame_confidence", -99)) for item in group) / len(group), 3),
             "chars": group,
             "method": "ctc",
-        })
+        }
+        # surface_spans point into the original G2P mora sequence.  CTC may
+        # omit symbols which are absent from its vocabulary, so retain the
+        # original mora identity on each compressed group for renderers.
+        if source_indices:
+            value["source_mora_indices"] = source_indices
+        result.append(value)
     return result
 
 
@@ -366,18 +377,33 @@ def align_ctc(
             inputs = processor(segment, sampling_rate=config.sample_rate, return_tensors="pt")
             logits = model(inputs.input_values.to(config.device)).logits[0]
             log_probs = torch.log_softmax(logits, dim=-1)
-            chars = [char for char in str(line["reading"]) if char in vocab]
+            reading = str(line["reading"])
+            original_mora_indices: list[int | None] = [None] * len(reading)
+            reading_cursor = 0
+            for mora_index, mora in enumerate(split_mora(reading)):
+                position = reading.find(mora, reading_cursor)
+                if position < 0:
+                    continue
+                for offset in range(position, min(len(reading), position + len(mora))):
+                    original_mora_indices[offset] = mora_index
+                reading_cursor = position + len(mora)
+            char_records = [
+                (reading_index, char, original_mora_indices[reading_index] if reading_index < len(original_mora_indices) else None)
+                for reading_index, char in enumerate(reading)
+                if char in vocab
+            ]
+            chars = [char for _, char, _ in char_records]
             target = [int(vocab[char]) for char in chars]
             spans, score = _forced_align(log_probs, target, blank)
             ratio = (len(segment) * 1000 / config.sample_rate) / max(1, logits.shape[0])
             tokens = []
-            for char, (a, b) in zip(chars, spans):
+            for (reading_index, char, source_mora_index), (a, b) in zip(char_records, spans):
                 raw_start = round(left * 1000 / config.sample_rate + a * ratio)
                 raw_end = round(left * 1000 / config.sample_rate + b * ratio)
                 token_start = max(start, min(end, raw_start))
                 token_end = max(token_start, min(end, raw_end))
                 confidence = log_probs[a:b, vocab[char]].mean().item() if b > a else -99.0
-                tokens.append({"text": char, "start_ms": token_start, "end_ms": token_end, "frame_confidence": round(float(confidence), 3)})
+                tokens.append({"text": char, "start_ms": token_start, "end_ms": token_end, "frame_confidence": round(float(confidence), 3), "source_reading_index": reading_index, "source_mora_index": source_mora_index})
             tokens, repaired = _repair_token_spans(tokens, window_start, window_end)
             coverage = len(tokens) / max(1, len(str(line["reading"])))
             updated = dict(line)

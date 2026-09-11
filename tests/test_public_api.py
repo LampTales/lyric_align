@@ -31,7 +31,8 @@ class PublicApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             song = make_song(Path(directory))
             original = pipeline.convert
-            pipeline.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
+            calls = []
+            pipeline.convert = lambda text, backend: (calls.append(text) or {"reading": "なつです", "backend": backend})
             try:
                 files = validate_song(song)
                 self.assertTrue(files["audio"].endswith("audio.mp3"))
@@ -125,6 +126,156 @@ class PublicApiTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertEqual(first.to_dict(), second.to_dict())
 
+    def test_lightweight_rerun_does_not_discard_completed_heavy_artifacts(self):
+        import tempfile
+        import lyric_align.pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as directory:
+            song = make_song(Path(directory))
+            original = pipeline.convert
+            calls = []
+            pipeline.convert = lambda text, backend: (calls.append(text) or {"reading": "なつです", "backend": backend})
+            try:
+                first = prepare_song(song, config=AlignmentConfig(enable_offset=False))
+                instrumental = song / "stems" / "instrumental.mp3"
+                instrumental.parent.mkdir()
+                instrumental.write_bytes(b"instrumental")
+                payload = first.to_dict()
+                payload["artifacts"]["instrumental"] = "stems/instrumental.mp3"
+                payload["stages"]["demucs"] = {
+                    "status": "done",
+                    "signature": pipeline._stage_signature(AlignmentConfig(enable_offset=False), "demucs"),
+                    "artifacts": {"vocals": None, "instrumental": "stems/instrumental.mp3"},
+                }
+                (song / "alignment.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                rerun = prepare_song(song, config=AlignmentConfig(enable_offset=False), stages=("reading",))
+            finally:
+                pipeline.convert = original
+
+            self.assertEqual(len(rerun.lines), len(first.lines))
+            self.assertEqual(rerun.artifacts.instrumental, "stems/instrumental.mp3")
+            self.assertEqual(len(calls), 1)
+            self.assertTrue(instrumental.exists())
+
+    def test_unrequested_demucs_state_survives_reading_rebuild(self):
+        import tempfile
+        import lyric_align.pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as directory:
+            song = make_song(Path(directory))
+            original = pipeline.convert
+            pipeline.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
+            try:
+                first = prepare_song(song, config=AlignmentConfig(enable_offset=False))
+                payload = first.to_dict()
+                payload["stages"]["demucs"] = {
+                    "status": "done",
+                    "signature": "from-another-demucs-config",
+                    "artifacts": {"instrumental": "stems/instrumental.mp3"},
+                }
+                (song / "alignment.json").write_text(
+                    json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+                )
+                rerun = prepare_song(
+                    song,
+                    config=AlignmentConfig(g2p_backend="openjtalk", enable_offset=False),
+                    stages=("reading",),
+                )
+            finally:
+                pipeline.convert = original
+
+            self.assertEqual(rerun.stages["demucs"]["status"], "done")
+
+    def test_temporary_vocal_path_is_not_reintroduced_after_lightweight_rerun(self):
+        import tempfile
+        import lyric_align.pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as directory:
+            song = make_song(Path(directory))
+            stems = song / "stems"
+            stems.mkdir()
+            (stems / "instrumental.mp3").write_bytes(b"instrumental")
+            original = pipeline.convert
+            pipeline.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
+            try:
+                first = prepare_song(song, config=AlignmentConfig(enable_offset=False))
+                payload = first.to_dict()
+                payload["stages"]["demucs"] = {
+                    "status": "done",
+                    "signature": "old-demucs",
+                    "artifacts": {
+                        "vocals": "stems/vocals.wav",
+                        "instrumental": "stems/instrumental.mp3",
+                    },
+                }
+                payload["artifacts"]["instrumental"] = "stems/instrumental.mp3"
+                (song / "alignment.json").write_text(
+                    json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+                )
+                (song / "preprocessing.json").write_text(
+                    json.dumps({"artifacts": payload["stages"]["demucs"]["artifacts"]}),
+                    encoding="utf-8",
+                )
+                rerun = prepare_song(
+                    song,
+                    config=AlignmentConfig(g2p_backend="openjtalk", enable_offset=False),
+                    stages=("reading",),
+                )
+            finally:
+                pipeline.convert = original
+
+            self.assertIsNone(rerun.artifacts.vocals)
+            self.assertIsNone(rerun.stages["demucs"]["artifacts"]["vocals"])
+            self.assertEqual(rerun.artifacts.instrumental, "stems/instrumental.mp3")
+
+    def test_partial_rerun_does_not_apply_cached_offset_twice(self):
+        import tempfile
+        import lyric_align.pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as directory:
+            song = make_song(Path(directory))
+            original_convert, original_align = pipeline.convert, pipeline.align_ctc
+            pipeline.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
+            pipeline.align_ctc = lambda vocal, lines, config, progress=None: [
+                dict(line, alignment_status="ctc") for line in lines
+            ]
+            try:
+                config = AlignmentConfig(enable_offset=False)
+                first = prepare_song(song, config=config)
+                payload = first.to_dict()
+                for line in payload["lines"]:
+                    line["start_ms"] += 100
+                    line["end_ms"] += 100
+                    for mora in line.get("mora", []):
+                        mora["start_ms"] += 100
+                        mora["end_ms"] += 100
+                    for unit in line.get("display_units", []):
+                        unit["start_ms"] += 100
+                        unit["end_ms"] += 100
+                payload["timing"]["global_offset_ms"] = 100
+                payload["timing"]["offset_status"] = "candidate"
+                (song / "alignment.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                vocal = song / "stems" / "vocals.mp3"
+                vocal.parent.mkdir()
+                vocal.write_bytes(b"vocal")
+                (song / "preprocessing.json").write_text(
+                    json.dumps({"demucs": {"artifacts": {"vocals": "stems/vocals.mp3"}}}),
+                    encoding="utf-8",
+                )
+                rerun = prepare_song(
+                    song,
+                    stages=("ctc",),
+                    config=AlignmentConfig(
+                        enable_offset=False,
+                        keep_vocals=True,
+                        models=ModelPaths(ctc_model_path="/models/ctc"),
+                    ),
+                )
+            finally:
+                pipeline.convert, pipeline.align_ctc = original_convert, original_align
+
+            self.assertEqual(rerun.lines[0].start_ms, 200)
+
     def test_ctc_collapsed_spans_are_repaired_for_display(self):
         tokens, changed = _repair_token_spans(
             [{"text": "な", "start_ms": 100, "end_ms": 100}, {"text": "つ", "start_ms": 100, "end_ms": 300}],
@@ -206,6 +357,29 @@ class PublicApiTests(unittest.TestCase):
         assert [item["text"] for item in units] == list("かなABC")
         assert all(item["romaji"] for item in units[:2])
         assert all(item["romaji"] == "" and item["reading"] == "" for item in units[2:])
+
+    def test_display_units_map_original_mora_to_compressed_ctc_mora(self):
+        line = {
+            "text": "ABCかな",
+            "start_ms": 0,
+            "end_ms": 1000,
+            "mora": [
+                {"text": "か", "start_ms": 500, "end_ms": 700, "source_mora_indices": [6]},
+                {"text": "な", "start_ms": 700, "end_ms": 900, "source_mora_indices": [7]},
+            ],
+            "surface_spans": [
+                {"surface_start": 0, "surface_end": 3, "reading": "えーびーしー", "mora_indices": [0, 1, 2, 3, 4, 5]},
+                {"surface_start": 3, "surface_end": 4, "reading": "か", "mora_indices": [6]},
+                {"surface_start": 4, "surface_end": 5, "reading": "な", "mora_indices": [7]},
+            ],
+            "warnings": [],
+        }
+        units = _build_display_units(line)
+        assert units[3]["reading"] == "か"
+        assert units[3]["start_ms"] == 500
+        assert units[4]["reading"] == "な"
+        assert units[4]["start_ms"] == 700
+        assert all(not unit["reading"] for unit in units[:3])
 
     def test_ctc_can_reuse_persisted_vocal_stem(self):
         import tempfile

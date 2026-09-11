@@ -42,7 +42,7 @@ not need to modify internal modules. The main controls are:
 
 | Area | Parameters |
 | --- | --- |
-| text | `g2p_backend`, `g2p_dictionary_path` |
+| text | `g2p_backend` (`g2p_dictionary_path` is reserved for a future custom dictionary backend) |
 | execution | `device`, `ffmpeg_path`, `sample_rate` |
 | Demucs/output | `demucs_model_name`, `keep_vocals`, `keep_instrumental`, `vocals_format`, `instrumental_format`, `vocals_bitrate`, `instrumental_bitrate` |
 | offset | `enable_offset`, `offset_low_ms`, `offset_high_ms`, `offset_step_ms` |
@@ -52,6 +52,10 @@ not need to modify internal modules. The main controls are:
 `whisper_model_path`. Model lifetime is intentionally not managed by this
 library: a service can keep a model/worker resident and pass the same config
 to multiple jobs, while a one-shot CLI invocation remains self-contained.
+
+The built-in Sudachi, OpenJTalk and pykakasi adapters currently use their
+installed/default dictionaries. `g2p_dictionary_path` is retained for a
+future adapter and is not read by these built-in backends.
 
 ## Stages and output
 
@@ -116,17 +120,21 @@ For renderer integration, `lyric_align.load_alignment(path)` returns a
 schema-validated `AlignmentArtifact`, or `None` for a missing/invalid file so a
 caller can fall back to the legacy sentence-level timeline.
 
-Preparation is stage-cacheable. A completed `alignment.json` is reused when
-the audio/lyrics hashes and full configuration signature match. A completed
-Demucs stage is independently reusable from `preprocessing.json` when its
-compressed stem files and stage signature are valid. Demucs is not resumed
-mid-song; interrupted or incomplete files are regenerated atomically.
+Preparation is stage-cacheable. A completed `alignment.json` is returned when
+the source audio/lyrics hashes and every requested stage signature match.
+Unrequested completed stages are preserved during a partial rerun; changing
+the reading stage invalidates its dependent CTC result. A completed Demucs
+stage is independently reusable when its retained compressed stem files and
+stage signature are valid. Demucs is not resumed mid-song; interrupted or
+incomplete files are regenerated atomically.
 
 For a split workflow, run Demucs with `keep_vocals=True` and later request
 `stages=("reading", "ctc")`; the persisted vocal stem is discovered from
 `preprocessing.json`. With the default temporary-vocal policy, a later CTC-only
-request correctly reports that the vocal input is unavailable and reruns
-Demucs when both stages are requested.
+request correctly reports that the vocal input is unavailable; request
+`stages=("demucs", "ctc")` to regenerate the temporary vocal stem and rerun
+CTC. The retained instrumental stem and completed alignment do not require
+the vocal stem for ordinary rendering or cache hits.
 
 CTC paths occasionally assign adjacent symbols to one acoustic frame. Before
 the quality gate, the library repairs such collapsed spans by a deterministic
