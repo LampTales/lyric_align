@@ -8,24 +8,42 @@ version = "0.1.0"
 description = "Model-assisted lyric reading and singing-time alignment"
 readme = "README.md"
 requires-python = ">=3.10"
-# Activity/offset modules are part of the public pipeline and import numpy at
-# module load time. Keep this small dependency in the base install; heavyweight
-# model runtimes remain optional below.
-dependencies = ["numpy>=1.24,<3"]
+license = {file = "LICENSE"}
+authors = [{name = "LampTales"}]
+keywords = ["lyrics", "karaoke", "forced-alignment", "japanese"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+]
+# Sudachi is the supported default reading backend. Heavy acoustic model
+# runtimes and less-tested alternative G2P backends remain opt-in.
+dependencies = [
+  "numpy>=1.24,<3",
+  "sudachipy>=0.6,<1",
+  "sudachidict-core",
+]
 
 [project.optional-dependencies]
-japanese = ["pykakasi>=2.3", "sudachipy>=0.6", "sudachidict-core"]
-ctc = ["torch", "torchaudio", "transformers"]
-demucs = ["demucs>=4.0"]
-all = [
-  "pykakasi>=2.3",
-  "sudachipy>=0.6",
-  "sudachidict-core",
-  "torch",
-  "torchaudio",
-  "transformers",
-  "demucs>=4.0",
+pykakasi = ["pykakasi>=2.3,<3"]
+openjtalk = ["pyopenjtalk>=0.4,<1"]
+ctc = ["torch>=2,<3", "torchaudio>=2,<3", "transformers>=4.40,<6"]
+demucs = ["demucs>=4,<5"]
+models = [
+  "torch>=2,<3",
+  "torchaudio>=2,<3",
+  "transformers>=4.40,<6",
+  "demucs>=4,<5",
 ]
+dev = ["build>=1,<2", "pytest>=7,<9"]
+
+[project.urls]
+Homepage = "https://github.com/LampTales/lyric_align"
+Repository = "https://github.com/LampTales/lyric_align"
+Issues = "https://github.com/LampTales/lyric_align/issues"
 
 [project.scripts]
 lyric-align = "lyric_align.cli:main"

@@ -22,8 +22,6 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--demucs-model-path", type=Path)
     prepare.add_argument("--demucs-model-name", default="htdemucs")
     prepare.add_argument("--ctc-model-path", type=Path)
-    prepare.add_argument("--g2p-dictionary-path", type=Path)
-    prepare.add_argument("--whisper-model-path", type=Path)
     prepare.add_argument("--device", default="cpu")
     prepare.add_argument("--ffmpeg-path", default="ffmpeg")
     prepare.add_argument("--keep-vocals", action="store_true", help="retain the vocal stem after CTC")
@@ -65,8 +63,6 @@ def main(argv: list[str] | None = None) -> int:
         models=ModelPaths(
             demucs_model_path=args.demucs_model_path,
             ctc_model_path=args.ctc_model_path,
-            g2p_dictionary_path=args.g2p_dictionary_path,
-            whisper_model_path=args.whisper_model_path,
         ),
     )
     artifact = prepare_song(args.song_dir, output_path=args.output, config=config, stages=tuple(args.stages), progress=lambda stage, fraction, message: print(f"[{stage}] {fraction:.0%} {message}"))

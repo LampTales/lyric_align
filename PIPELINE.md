@@ -61,7 +61,7 @@ lyric_align/
 
 ```bash
 conda activate lyric
-python prepare_reading.py --backend openjtalk --out results/reading_openjtalk
+python prepare_reading.py --backend sudachi --out results/reading_sudachi
 ```
 
 ### 4.2 reading 规则
@@ -137,7 +137,7 @@ CTC 模型输入人声波形，输出每个声学帧对词表标签的概率。�
   "schema_version": 1,
   "song": {"id": 1867888452, "title": "なつのせいです", "artist": "羊文学"},
   "source": {"timeline": "lyrics_timeline.json", "audio": "audio.mp3"},
-  "reading_backend": "openjtalk",
+  "reading_backend": "sudachi",
   "lines": [{
     "line_index": 0,
     "text": "それは夏のせいです",
@@ -221,10 +221,10 @@ backend image
 
 - `LYRIC_MODEL_DIR=/var/lib/lyric-models`；
 - `HF_HOME=/var/lib/lyric-models/huggingface`；
-- `LYRIC_G2P_BACKEND=openjtalk`；
+- `LYRIC_G2P_BACKEND=sudachi`；
 - `LYRIC_DEVICE=cpu` 或 `cuda`（若节点有 GPU）。
 
-容器启动时使用 `local_files_only=true`；模型缺失应在健康检查/任务状态中报告明确错误，不应在视频请求期间偷偷联网下载。模型目录作为独立 Docker volume 或宿主机只读 bind mount 配置，升级镜像不改模型；模型版本写入 `alignment.json`。Demucs、wav2vec2 权重和 pyopenjtalk 词典均不进入镜像层。
+容器启动时使用 `local_files_only=true`；模型缺失应在健康检查/任务状态中报告明确错误，不应在视频请求期间偷偷联网下载。模型目录作为独立 Docker volume 或宿主机只读 bind mount 配置，升级镜像不改模型；模型版本写入 `alignment.json`。Demucs 和 wav2vec2 权重均不进入镜像层。Sudachi 及其系统词典属于 Python 包依赖；实验性的 pyopenjtalk 后端需要单独安装。
 
 ## 10. 耗时基线（Apple Silicon MacBook，CPU）
 
@@ -267,7 +267,7 @@ PYTHONPATH=src python -m lyric_align.cli prepare \
 
 ```bash
 conda activate lyric
-python prepare_reading.py --backend openjtalk --out results/reading_openjtalk
+python prepare_reading.py --backend sudachi --out results/reading_sudachi
 python activity_baseline.py
 export HF_HOME="$PWD/models/huggingface"
 python ctc_align.py --song <song_dir> --vocals <vocals.wav> \

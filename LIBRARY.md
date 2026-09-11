@@ -22,14 +22,12 @@ accepted as anchors but do not receive interpolated mora intervals.
 
 ## Resources
 
-`ModelPaths` deliberately has one field per model/resource:
+`ModelPaths` deliberately has one field per implemented acoustic model:
 
 ```python
 ModelPaths(
     demucs_model_path=...,       # Demucs .th directory or HF snapshot
     ctc_model_path=...,          # Transformers CTC checkpoint
-    g2p_dictionary_path=...,     # optional dictionary data
-    whisper_model_path=...,      # reserved for an optional recognizer
 )
 ```
 
@@ -42,20 +40,21 @@ not need to modify internal modules. The main controls are:
 
 | Area | Parameters |
 | --- | --- |
-| text | `g2p_backend` (`g2p_dictionary_path` is reserved for a future custom dictionary backend) |
+| text | `g2p_backend` (`sudachi` by default) |
 | execution | `device`, `ffmpeg_path`, `sample_rate` |
 | Demucs/output | `demucs_model_name`, `keep_vocals`, `keep_instrumental`, `vocals_format`, `instrumental_format`, `vocals_bitrate`, `instrumental_bitrate` |
 | offset | `enable_offset`, `offset_low_ms`, `offset_high_ms`, `offset_step_ms` |
 | CTC | `ctc_margin_ms`, `ctc_score_threshold` |
 
-`ModelPaths` keeps model resources independent, including the reserved
-`whisper_model_path`. Model lifetime is intentionally not managed by this
-library: a service can keep a model/worker resident and pass the same config
-to multiple jobs, while a one-shot CLI invocation remains self-contained.
+`ModelPaths` keeps model resources independent. CTC and Demucs objects are
+cached by resolved model path and device inside each Python process, so a
+long-running worker reuses them across calls. Use `clear_model_cache()` after
+changing a model or device. A one-shot CLI invocation remains self-contained.
 
-The built-in Sudachi, OpenJTalk and pykakasi adapters currently use their
-installed/default dictionaries. `g2p_dictionary_path` is retained for a
-future adapter and is not read by these built-in backends.
+Sudachi is the supported default reading backend and uses the installed
+`sudachidict-core` dictionary. OpenJTalk and pykakasi are experimental
+alternatives with separate optional dependencies; they have not received the
+same end-to-end validation as the Sudachi path.
 
 ## Stages and output
 

@@ -11,5 +11,7 @@
   fallback and song-level offset estimation.
 - Stage-aware caching and temporary vocal-stem cleanup.
 
-The pipeline version recorded in artifacts is currently `0.3`; it includes
-post-processing that repairs collapsed CTC token spans for continuous display.
+The pipeline version recorded in artifacts is currently `0.7`; it includes
+post-processing that repairs collapsed CTC token spans for continuous display,
+stable mixed-language display mapping, and pronunciation filtering for
+non-Japanese surface text.

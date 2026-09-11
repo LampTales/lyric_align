@@ -3,7 +3,7 @@ from pathlib import Path
 
 from lyric_align import AlignmentConfig, AlignmentArtifact, ModelPaths, load_alignment, prepare_song, validate_song
 from lyric_align.exceptions import InputValidationError
-from lyric_align.g2p import build_surface_spans
+from lyric_align.g2p import build_surface_spans, convert
 from lyric_align.pipeline import _build_display_units
 from lyric_align.stages import _repair_token_spans
 import unittest
@@ -24,6 +24,12 @@ def make_song(tmp_path: Path) -> Path:
 class PublicApiTests(unittest.TestCase):
     def test_default_reading_backend_is_sudachi(self):
         self.assertEqual(AlignmentConfig().g2p_backend, "sudachi")
+
+    def test_default_sudachi_backend_is_installed_and_usable(self):
+        result = convert("夏です", "sudachi")
+        self.assertEqual(result["backend"], "sudachi")
+        self.assertTrue(result["reading"])
+        self.assertTrue(result["tokens"])
 
     def test_validate_and_prepare_without_model_paths(self):
         import lyric_align.pipeline as pipeline
@@ -88,9 +94,13 @@ class PublicApiTests(unittest.TestCase):
 
     def test_resource_paths_and_formats_are_independent(self):
         config = AlignmentConfig(
-            models=ModelPaths(demucs_model_path="/a", ctc_model_path="/b", g2p_dictionary_path="/c"),
+            models=ModelPaths(demucs_model_path="/a", ctc_model_path="/b"),
             vocals_format="flac",
             instrumental_format="mp3",
+        )
+        self.assertEqual(
+            set(config.models.as_dict()),
+            {"demucs_model_path", "ctc_model_path"},
         )
         self.assertEqual(config.models.as_dict()["demucs_model_path"], "/a")
         self.assertEqual(config.models.as_dict()["ctc_model_path"], "/b")
@@ -289,10 +299,10 @@ class PublicApiTests(unittest.TestCase):
         self.assertTrue(all(tokens[i]["start_ms"] >= tokens[i - 1]["end_ms"] for i in range(1, len(tokens))))
 
     def test_ctc_alignment_returns_quality_failure_for_empty_or_short_windows(self):
-        import torch
+        import numpy as np
         from lyric_align.stages import _forced_align
-        empty, empty_score = _forced_align(torch.empty((0, 4)), [1], 0)
-        short, short_score = _forced_align(torch.zeros((1, 4)), [1, 2], 0)
+        empty, empty_score = _forced_align(np.empty((0, 4)), [1], 0)
+        short, short_score = _forced_align(np.zeros((1, 4)), [1, 2], 0)
         self.assertEqual(empty, [(0, 0)])
         self.assertEqual(short, [(0, 0), (0, 0)])
         self.assertLess(empty_score, -1e8)

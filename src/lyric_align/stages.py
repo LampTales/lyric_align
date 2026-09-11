@@ -276,8 +276,6 @@ def _decode_audio(path: Path, ffmpeg_path: str, sample_rate: int) -> Any:
 
 
 def _forced_align(log_probs: Any, target: list[int], blank: int) -> tuple[list[tuple[int, int]], float]:
-    import torch
-
     if not target:
         return [], 0.0
     if getattr(log_probs, "ndim", 0) != 2 or int(log_probs.shape[0]) <= 0:
@@ -290,6 +288,8 @@ def _forced_align(log_probs: Any, target: list[int], blank: int) -> tuple[list[t
     )
     if int(log_probs.shape[0]) < minimum_frames:
         return [(0, 0) for _ in target], -1e9
+    import torch
+
     extended = [blank]
     for value in target:
         extended.extend((value, blank))

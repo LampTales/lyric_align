@@ -9,25 +9,18 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class ModelPaths:
-    """Paths for individual models and data resources.
+    """Paths for the acoustic models used by implemented stages.
 
     Each resource is intentionally a separate field.  This permits users to
     use different volumes, model providers, or versions for each stage.
-    ``None`` means that the stage's local/default backend may be used.
+    ``None`` means that the corresponding stage is not configured.
     """
 
     demucs_model_path: Path | None = None
     ctc_model_path: Path | None = None
-    g2p_dictionary_path: Path | None = None
-    whisper_model_path: Path | None = None
 
     def __post_init__(self) -> None:
-        for name in (
-            "demucs_model_path",
-            "ctc_model_path",
-            "g2p_dictionary_path",
-            "whisper_model_path",
-        ):
+        for name in ("demucs_model_path", "ctc_model_path"):
             value = getattr(self, name)
             if value is not None and not isinstance(value, Path):
                 object.__setattr__(self, name, Path(value))
@@ -38,8 +31,6 @@ class ModelPaths:
             for name, value in (
                 ("demucs_model_path", self.demucs_model_path),
                 ("ctc_model_path", self.ctc_model_path),
-                ("g2p_dictionary_path", self.g2p_dictionary_path),
-                ("whisper_model_path", self.whisper_model_path),
             )
         }
 

@@ -30,7 +30,6 @@ def _stage_signature(config: AlignmentConfig, stage: str) -> str:
     if stage == "reading":
         values = {
             "g2p_backend": config.g2p_backend,
-            "g2p_dictionary_path": str(config.models.g2p_dictionary_path) if config.models.g2p_dictionary_path else None,
             "enable_offset": config.enable_offset,
             "offset_low_ms": config.offset_low_ms,
             "offset_high_ms": config.offset_high_ms,

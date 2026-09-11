@@ -5,6 +5,8 @@ dependencies:
   - python=3.11
   - pip
   - pip:
+      # Full research environment. The supported production/default G2P path
+      # uses Sudachi; pykakasi and OpenJTalk are kept for comparisons.
       - pykakasi==2.3.0
       - sudachipy==0.6.11
       - sudachidict_core==20260723

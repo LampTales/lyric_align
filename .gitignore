@@ -6,6 +6,10 @@ build/
 dist/
 .pytest_cache/
 .DS_Store
+.env
+.env.*
+*.key
+*.pem
 
 # Generated alignment reports and temporary logs
 results/
