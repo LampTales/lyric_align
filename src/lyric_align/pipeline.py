@@ -150,6 +150,14 @@ def _build_display_units(line: dict[str, Any]) -> list[dict[str, Any]]:
     previous_start = start
     order_repaired = False
     for index, char in enumerate(text):
+        span = next(
+            (
+                item
+                for item in spans
+                if int(item.get("surface_start", 0)) <= index < int(item.get("surface_end", 0))
+            ),
+            {},
+        )
         indices: list[int] = []
         for span in spans:
             a, b = int(span.get("surface_start", 0)), int(span.get("surface_end", 0))
@@ -171,7 +179,12 @@ def _build_display_units(line: dict[str, Any]) -> list[dict[str, Any]]:
                         hi = min(len(values), lo + 1)
                     indices = values[lo:hi] or [values[min(lo, len(values) - 1)]]
                 break
-        if not indices and mora and not has_mora_source_map:
+        # A token with no reading (most punctuation) is intentionally absent
+        # from the mora timeline.  Do not attach it to a proportional mora;
+        # that would make punctuation inherit an unrelated sung interval and
+        # overlap the neighbouring character.  Only characters with no span
+        # metadata at all use the legacy proportional fallback.
+        if not indices and mora and not has_mora_source_map and not span:
             indices = [min(len(mora) - 1, int(index * len(mora) / max(1, len(text))))]
         if indices:
             a = min(int(mora[i].get("start_ms", start)) for i in indices)
@@ -187,7 +200,12 @@ def _build_display_units(line: dict[str, Any]) -> list[dict[str, Any]]:
         # the naive proportional fallback can move backwards in time.  Keep
         # the final display contract monotonic and retain at least one frame
         # for a displaced character.
-        if a < previous_start:
+        # Spanned-but-unmapped characters are deliberately projected into a
+        # local gap below, so their provisional sentence-relative position is
+        # allowed to fall behind the previous aligned onset here.  Keep the
+        # monotonicity repair for actual mora mappings and metadata-free
+        # legacy fallbacks only.
+        if a < previous_start and not (span and not indices):
             order_repaired = True
             # Prefer the character's sentence-relative position over a stale
             # CTC mora index. This gives an omitted final symbol a useful
@@ -202,7 +220,6 @@ def _build_display_units(line: dict[str, Any]) -> list[dict[str, Any]]:
         b = min(end, b)
         if b < a:
             a = b = end
-        span = next((item for item in spans if int(item.get("surface_start", 0)) <= index < int(item.get("surface_end", 0))), {})
         unit_reading = (
             "".join(str(mora[i].get("text") or "") for i in indices)
             if indices
@@ -222,12 +239,149 @@ def _build_display_units(line: dict[str, Any]) -> list[dict[str, Any]]:
             "romaji": romaji(unit_reading) if char.strip() and japanese_surface else "",
         })
         previous_start = a
-    if order_repaired:
+    # Unmapped visible characters (punctuation and omitted-language fragments)
+    # do not have an acoustic anchor of their own.  Place each contiguous run
+    # in the gap between its nearest mapped neighbours instead of interpolating
+    # across the complete sentence.  This keeps the CTC/mora boundaries intact
+    # and makes the source of the timing explicit: alignment still owns all
+    # lyric times; this is only a display-character projection.
+    unmapped_repaired = _fill_unmapped_display_unit_gaps(units, start, end)
+    overlap_repaired = _split_overlapping_display_units(units)
+    if order_repaired or unmapped_repaired or overlap_repaired:
         warnings = line.setdefault("warnings", [])
-        message = "display unit timing repaired for monotonicity"
-        if message not in warnings:
-            warnings.append(message)
+        messages = ["display unit timing repaired for monotonicity"] if order_repaired else []
+        if unmapped_repaired:
+            messages.append("unmapped display unit timing placed between aligned neighbours")
+        if overlap_repaired:
+            messages.append("overlapping display unit timing split for sequential highlighting")
+        for message in messages:
+            if message not in warnings:
+                warnings.append(message)
     return units
+
+
+def _fill_unmapped_display_unit_gaps(units: list[dict[str, Any]], start: int, end: int) -> bool:
+    """Project unaligned visible characters into neighbouring timing gaps.
+
+    CTC deliberately filters symbols that are not in its vocabulary, while G2P
+    still keeps those surface characters (punctuation and Latin fragments) so
+    the rendered lyric text remains faithful.  A sentence-relative fallback
+    for such characters can land inside an already aligned mora interval.  We
+    instead divide only the local gap bounded by the preceding/following
+    aligned units.  Whitespace remains an explicit boundary and is left
+    untouched.
+    """
+    changed = False
+    index = 0
+    while index < len(units):
+        item = units[index]
+        if item.get("mora_indices") or not str(item.get("text") or "").strip():
+            index += 1
+            continue
+        run_end = index + 1
+        while (
+            run_end < len(units)
+            and not units[run_end].get("mora_indices")
+            and str(units[run_end].get("text") or "").strip()
+        ):
+            run_end += 1
+
+        left = int(start)
+        if index > 0:
+            previous = units[index - 1]
+            # Whitespace is not highlighted, but it is still an explicit
+            # boundary in the surface text and therefore a valid edge for an
+            # unmapped punctuation/language run.
+            if not str(previous.get("text") or "").strip() or previous.get("mora_indices"):
+                left = int(previous.get("end_ms", left))
+        right = int(end)
+        if run_end < len(units):
+            following = units[run_end]
+            if not str(following.get("text") or "").strip() or following.get("mora_indices"):
+                right = int(following.get("start_ms", right))
+        right = max(left, right)
+        duration = right - left
+        count = run_end - index
+        for offset, unit in enumerate(units[index:run_end]):
+            a = left + round(duration * offset / count)
+            b = left + round(duration * (offset + 1) / count)
+            if int(unit.get("start_ms", a)) != a or int(unit.get("end_ms", b)) != b:
+                changed = True
+            unit["start_ms"], unit["end_ms"] = a, max(a, b)
+        index = run_end
+    return changed
+
+
+def _split_overlapping_display_units(units: list[dict[str, Any]]) -> bool:
+    """Split colliding visible-character intervals into a sequential run.
+
+    CTC/mora timing is monotonic, but several surface characters can inherit
+    one mora's interval (for example an ASCII fragment mapped to a single
+    pronunciation unit).  Keeping that interval on every glyph makes KTV
+    paint all of them at once.  The display contract is therefore partitioned
+    only for connected overlaps of non-whitespace units.  Distinct original
+    onset boundaries are preserved where possible; units sharing one onset are
+    split using their original duration weights. Explicit whitespace remains
+    a timing boundary and is never rewritten here.
+    """
+    if len(units) < 2:
+        return False
+    changed = False
+    index = 0
+    while index < len(units) - 1:
+        if not str(units[index].get("text") or "").strip():
+            index += 1
+            continue
+        end_index = index
+        group_end = int(units[index].get("end_ms", units[index].get("start_ms", 0)))
+        while end_index + 1 < len(units):
+            following = units[end_index + 1]
+            if not str(following.get("text") or "").strip():
+                break
+            following_start = int(following.get("start_ms", group_end))
+            if following_start >= group_end:
+                break
+            end_index += 1
+            group_end = max(group_end, int(following.get("end_ms", following_start)))
+        if end_index == index:
+            index += 1
+            continue
+
+        group = units[index : end_index + 1]
+        group_end = max(group_end, max(int(item.get("end_ms", 0)) for item in group))
+        # Preserve distinct acoustic onsets whenever possible.  Only a run of
+        # units with the same onset needs interpolation; its upper boundary is
+        # the next distinct onset (or the end of the collision group).
+        cursor = int(group[0].get("start_ms", 0))
+        offset = 0
+        while offset < len(group):
+            run_start = max(cursor, int(group[offset].get("start_ms", cursor)))
+            run_end = offset + 1
+            while run_end < len(group) and int(group[run_end].get("start_ms", run_start)) == int(group[offset].get("start_ms", run_start)):
+                run_end += 1
+            limit = group_end
+            if run_end < len(group):
+                limit = max(run_start, int(group[run_end].get("start_ms", run_start)))
+            weights = [
+                max(1, int(item.get("end_ms", run_start)) - int(item.get("start_ms", run_start)))
+                for item in group[offset:run_end]
+            ]
+            total_weight = max(1, sum(weights))
+            run_duration = max(0, limit - run_start)
+            for run_offset, item in enumerate(group[offset:run_end]):
+                if run_offset == run_end - offset - 1:
+                    boundary = limit
+                else:
+                    boundary = run_start + round(run_duration * sum(weights[: run_offset + 1]) / total_weight)
+                    remaining = run_end - offset - run_offset - 1
+                    boundary = min(limit - remaining, max(cursor + 1, boundary)) if run_duration >= remaining + 1 else max(cursor, boundary)
+                if int(item.get("start_ms", cursor)) != cursor or int(item.get("end_ms", cursor)) != boundary:
+                    changed = True
+                item["start_ms"], item["end_ms"] = cursor, max(cursor, boundary)
+                cursor = item["end_ms"]
+            offset = run_end
+        index = end_index + 1
+    return changed
 
 
 def _apply_timing_policy(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:

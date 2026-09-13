@@ -31,6 +31,19 @@ class PublicApiTests(unittest.TestCase):
         self.assertTrue(result["reading"])
         self.assertTrue(result["tokens"])
 
+    def test_wrapped_music_marker_is_non_sung(self):
+        import tempfile
+        import lyric_align.pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as directory:
+            song = make_song(Path(directory))
+            (song / "lyrics_timeline.json").write_text(
+                json.dumps([{"text": "~music~", "start_ms": 100, "end_ms": 200}], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            lines = pipeline.build_reading_lines(song, AlignmentConfig(enable_offset=False))
+            self.assertEqual(lines[0].status, "non_sung")
+
     def test_validate_and_prepare_without_model_paths(self):
         import lyric_align.pipeline as pipeline
         import tempfile
@@ -342,7 +355,7 @@ class PublicApiTests(unittest.TestCase):
         }
         units = _build_display_units(line)
         assert [item["start_ms"] for item in units] == sorted(item["start_ms"] for item in units)
-        assert "display unit timing repaired for monotonicity" in line["warnings"]
+        assert "unmapped display unit timing placed between aligned neighbours" in line["warnings"]
 
     def test_display_units_do_not_attach_pronunciation_to_latin_surface_text(self):
         line = {
@@ -390,6 +403,95 @@ class PublicApiTests(unittest.TestCase):
         assert units[4]["reading"] == "な"
         assert units[4]["start_ms"] == 700
         assert all(not unit["reading"] for unit in units[:3])
+
+    def test_unmapped_punctuation_uses_gap_after_aligned_character(self):
+        # Sudachi keeps punctuation as a surface token, but CTC has no mora
+        # for it.  The punctuation must not be interpolated into the preceding
+        # mora interval.
+        line = {
+            "text": "醜恐!",
+            "start_ms": 0,
+            "end_ms": 400,
+            "mora": [
+                {"text": "しゅう", "start_ms": 0, "end_ms": 100},
+                {"text": "お", "start_ms": 100, "end_ms": 200},
+                {"text": "そ", "start_ms": 200, "end_ms": 300},
+                {"text": "れ", "start_ms": 300, "end_ms": 350},
+            ],
+            "surface_spans": [
+                {"surface_start": 0, "surface_end": 1, "reading": "しゅう", "mora_indices": [0]},
+                {"surface_start": 1, "surface_end": 2, "reading": "おそれ", "mora_indices": [1, 2, 3]},
+                {"surface_start": 2, "surface_end": 3, "reading": "!", "mora_indices": []},
+            ],
+            "warnings": [],
+        }
+        units = _build_display_units(line)
+        assert (units[1]["start_ms"], units[1]["end_ms"]) == (100, 350)
+        assert (units[2]["start_ms"], units[2]["end_ms"]) == (350, 400)
+        assert "unmapped display unit timing placed between aligned neighbours" in line["warnings"]
+
+    def test_unmapped_language_run_uses_gap_before_aligned_character(self):
+        line = {
+            "text": "ABCかな",
+            "start_ms": 0,
+            "end_ms": 1000,
+            "mora": [
+                {"text": "か", "start_ms": 500, "end_ms": 700, "source_mora_indices": [6]},
+                {"text": "な", "start_ms": 700, "end_ms": 900, "source_mora_indices": [7]},
+            ],
+            "surface_spans": [
+                {"surface_start": 0, "surface_end": 3, "reading": "えーびーしー", "mora_indices": [0, 1, 2, 3, 4, 5]},
+                {"surface_start": 3, "surface_end": 4, "reading": "か", "mora_indices": [6]},
+                {"surface_start": 4, "surface_end": 5, "reading": "な", "mora_indices": [7]},
+            ],
+            "warnings": [],
+        }
+        units = _build_display_units(line)
+        assert [(item["start_ms"], item["end_ms"]) for item in units[:3]] == [(0, 167), (167, 333), (333, 500)]
+        assert units[3]["start_ms"] == 500
+
+    def test_display_units_split_shared_mora_intervals_for_sequential_highlight(self):
+        line = {
+            "text": "ABC",
+            "start_ms": 0,
+            "end_ms": 300,
+            "mora": [{"text": "あ", "start_ms": 100, "end_ms": 200}],
+            "surface_spans": [
+                {"surface_start": 0, "surface_end": 3, "reading": "あ", "mora_indices": [0]}
+            ],
+            "warnings": [],
+        }
+        units = _build_display_units(line)
+        assert [(item["start_ms"], item["end_ms"]) for item in units] == [
+            (100, 133),
+            (133, 167),
+            (167, 200),
+        ]
+        assert "overlapping display unit timing split for sequential highlighting" in line["warnings"]
+
+    def test_display_units_preserve_distinct_onsets_when_only_intervals_overlap(self):
+        line = {
+            "text": "ABC",
+            "start_ms": 0,
+            "end_ms": 400,
+            "mora": [
+                {"text": "あ", "start_ms": 100, "end_ms": 250},
+                {"text": "い", "start_ms": 200, "end_ms": 350},
+                {"text": "う", "start_ms": 300, "end_ms": 400},
+            ],
+            "surface_spans": [
+                {"surface_start": 0, "surface_end": 1, "reading": "あ", "mora_indices": [0]},
+                {"surface_start": 1, "surface_end": 2, "reading": "い", "mora_indices": [1]},
+                {"surface_start": 2, "surface_end": 3, "reading": "う", "mora_indices": [2]},
+            ],
+            "warnings": [],
+        }
+        units = _build_display_units(line)
+        assert [(item["start_ms"], item["end_ms"]) for item in units] == [
+            (100, 200),
+            (200, 300),
+            (300, 400),
+        ]
 
     def test_ctc_can_reuse_persisted_vocal_stem(self):
         import tempfile

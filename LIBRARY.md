@@ -104,6 +104,14 @@ character-level certainty.
 with `start_ms`/`end_ms`, reading, romaji and `mora_indices`. Consumers should
 use these final units for sweep timing and pronunciation placement. `tokens`
 and `mora` are retained for diagnostics and must not be rescaled downstream.
+Characters that have no CTC/mora anchor (for example punctuation or a Latin
+fragment omitted from the model vocabulary) are projected into the local gap
+between their nearest aligned neighbours. They are not interpolated across the
+whole sentence, so they cannot steal time from an adjacent mora. As a final
+safety check, any remaining overlap between visible units is split into a
+sequential run during artifact creation; explicit whitespace remains a timing
+boundary. This keeps all timing decisions in the alignment artifact and
+prevents a renderer from having to infer ordering.
 Pronunciation fields are populated only for Japanese surface characters;
 Latin words and other scripts remain present in `text` but have empty
 `reading`/`romaji`, even when a G2P backend happens to transliterate them.

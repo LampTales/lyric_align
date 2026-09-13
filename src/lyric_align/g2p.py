@@ -9,7 +9,9 @@ SMALL = set("ゃゅょぁぃぅぇぉゎゕゖャュョァィゥェォヮヵヶ"
 KANA = re.compile(r"[\u3040-\u30ffー]")
 NON_SUNG = re.compile(
     r"^(?:作詞|作曲|編曲|词|曲|编曲|作词|作曲|arranger|lyrics|music)\s*[:：]"
-    r"|^(?:間奏|间奏|instrumental|interlude|music)\s*$", re.I
+    r"|^[~*_\-\[\]{}()<>「」『』【】〔〕·•.,!?！？:：]*"
+    r"(?:間奏|间奏|instrumental|interlude|music)"
+    r"[~*_\-\[\]{}()<>「」『』【】〔〕·•.,!?！？:：]*$", re.I
 )
 
 
