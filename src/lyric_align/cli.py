@@ -33,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--sample-rate", type=int, default=16000)
     prepare.add_argument("--ctc-margin-ms", type=int, default=500)
     prepare.add_argument("--ctc-score-threshold", type=float, default=-1.5)
+    prepare.add_argument("--ctc-coverage-threshold", type=float, default=0.8)
     prepare.add_argument("--offset-low-ms", type=int, default=-2000)
     prepare.add_argument("--offset-high-ms", type=int, default=2000)
     prepare.add_argument("--offset-step-ms", type=int, default=40)
@@ -56,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         sample_rate=args.sample_rate,
         ctc_margin_ms=args.ctc_margin_ms,
         ctc_score_threshold=args.ctc_score_threshold,
+        ctc_coverage_threshold=args.ctc_coverage_threshold,
         offset_low_ms=args.offset_low_ms,
         offset_high_ms=args.offset_high_ms,
         offset_step_ms=args.offset_step_ms,

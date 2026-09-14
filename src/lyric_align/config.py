@@ -67,6 +67,7 @@ class AlignmentConfig:
     ctc_activity_margin_ms: int = 120
     activity_confidence_threshold: float = 0.45
     ctc_score_threshold: float = -1.5
+    ctc_coverage_threshold: float = 0.8
     # Bump when deterministic post-processing changes invalidate cached
     # alignment.json files (0.9 projects unmapped display characters into
     # neighbouring alignment gaps before the overlap safety pass).
@@ -89,6 +90,8 @@ class AlignmentConfig:
             raise ValueError("activity_confidence_threshold must be between 0 and 1")
         if not math.isfinite(float(self.ctc_score_threshold)):
             raise ValueError("ctc_score_threshold must be finite")
+        if not 0.0 <= float(self.ctc_coverage_threshold) <= 1.0:
+            raise ValueError("ctc_coverage_threshold must be between 0 and 1")
         for name in ("vocals_format", "instrumental_format"):
             if getattr(self, name) not in {"mp3", "flac", "wav"}:
                 raise ValueError(f"{name} must be mp3, flac, or wav")
@@ -116,6 +119,7 @@ class AlignmentConfig:
             "ctc_activity_margin_ms": self.ctc_activity_margin_ms,
             "activity_confidence_threshold": self.activity_confidence_threshold,
             "ctc_score_threshold": self.ctc_score_threshold,
+            "ctc_coverage_threshold": self.ctc_coverage_threshold,
             "pipeline_version": self.pipeline_version,
             "models": self.models.as_dict(),
         }

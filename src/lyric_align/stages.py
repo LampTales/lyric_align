@@ -411,7 +411,7 @@ def align_ctc(
             updated["tokens"] = tokens
             updated["ctc_window"] = {"start_ms": window_start, "end_ms": window_end, "source": window_source}
             positive_ratio = sum(int(item["end_ms"] > item["start_ms"]) for item in tokens) / max(1, len(tokens))
-            updated["alignment_status"] = "ctc" if coverage >= 0.8 and score >= config.ctc_score_threshold and positive_ratio >= 1.0 else "fallback"
+            updated["alignment_status"] = "ctc" if coverage >= config.ctc_coverage_threshold and score >= config.ctc_score_threshold and positive_ratio >= 1.0 else "fallback"
             if updated["alignment_status"] == "ctc":
                 updated["mora"] = _group_ctc_mora(tokens)
                 updated["coverage"] = round(coverage, 3)
