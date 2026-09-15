@@ -35,6 +35,14 @@ def _stage_signature(config: AlignmentConfig, stage: str) -> str:
             "offset_high_ms": config.offset_high_ms,
             "offset_step_ms": config.offset_step_ms,
             "pipeline_version": config.pipeline_version,
+            "offset_policy": {key: value for key, value in config.as_dict().items() if key.startswith("offset_")},
+            "sample_rate": config.sample_rate,
+            "ffmpeg_path": config.ffmpeg_path,
+            "demucs_model_path": str(config.models.demucs_model_path),
+            "demucs_model_name": config.demucs_model_name,
+            "offset_ctc_model_path": str(config.models.ctc_model_path) if config.offset_acoustic_verify else None,
+            "offset_ctc_coverage": config.ctc_coverage_threshold if config.offset_acoustic_verify else None,
+            "offset_device": config.device if config.offset_acoustic_verify else None,
         }
     elif stage == "demucs":
         values = {"demucs_model_name": config.demucs_model_name, "demucs_model_path": str(config.models.demucs_model_path) if config.models.demucs_model_path else None, "device": config.device, "keep_vocals": config.keep_vocals, "keep_instrumental": config.keep_instrumental, "vocals_format": config.vocals_format, "instrumental_format": config.instrumental_format, "vocals_bitrate": config.vocals_bitrate, "instrumental_bitrate": config.instrumental_bitrate}
@@ -471,6 +479,8 @@ def prepare_song(
     each adapter writes into the same versioned output contract.
     """
     config = config or AlignmentConfig()
+    if config.offset_acoustic_verify and not Path(config.models.ctc_model_path).is_dir():
+        raise StageUnavailableError("offset acoustic verification requires a local CTC model directory")
     song_dir = Path(song_dir)
     files = validate_song_directory(song_dir)
     destination = Path(output_path) if output_path is not None else song_dir / "alignment.json"
@@ -484,7 +494,13 @@ def prepare_song(
         and cached.inputs.get("audio", {}).get("sha256") == audio_hash
         and cached.inputs.get("lyrics_timeline", {}).get("sha256") == timeline_hash
     )
-    if source_matches and all(
+    # A reading-only mix estimate must be reconsidered when vocals become
+    # available later. Fully prepared artifacts can still serve subsets.
+    offset_source_matches = not (
+        config.enable_offset and requested.intersection({"demucs", "ctc"})
+        and cached and cached.stages.get("reading", {}).get("offset_audio_source") != "vocals"
+    )
+    if source_matches and offset_source_matches and all(
         _stage_done(cached, name, _stage_signature(config, name)) for name in requested
     ):
         # A request for a lightweight subset must not discard completed heavy
@@ -496,6 +512,7 @@ def prepare_song(
         progress("reading", 0.0, "building lyric readings")
     reading_reusable = bool(
         source_matches
+        and offset_source_matches
         and cached is not None
         and _stage_done(cached, "reading", _stage_signature(config, "reading"))
     )
@@ -555,7 +572,7 @@ def prepare_song(
             preprocessing.get("demucs", {}).get("signature") == demucs_signature
             or (cached and cached.stages.get("demucs", {}).get("signature") == demucs_signature)
         )
-        need_vocal = "ctc" in stages or config.keep_vocals
+        need_vocal = "ctc" in stages or config.keep_vocals or (config.enable_offset and not reading_reusable)
         cached_stems = cached_stems and (not need_vocal or expected_vocal.is_file()) and (not config.keep_instrumental or expected_instrumental.is_file())
         if cached_stems:
             stem_paths = {"vocals": str(expected_vocal.relative_to(song_dir)) if expected_vocal.is_file() else None, "instrumental": str(expected_instrumental.relative_to(song_dir)) if expected_instrumental.is_file() else None}
@@ -569,13 +586,13 @@ def prepare_song(
             )
         else:
             stage_state["demucs"] = {"status": "running", "model": config.demucs_model_name}
-            # CTC needs a vocal file while it runs. It can be temporary when
-            # the caller chooses keep_vocals=False, avoiding duplicate audio.
-            demucs_config = replace(config, keep_vocals=True) if "ctc" in stages and not config.keep_vocals else config
+            # CTC and fresh offset estimation need vocals during this call;
+            # the caller's retention policy still controls final cleanup.
+            demucs_config = replace(config, keep_vocals=True) if need_vocal and not config.keep_vocals else config
             stem_paths = separate_stems(files["audio"], song_dir, demucs_config, lambda fraction, message: progress("demucs", fraction, message) if progress else None)
             stage_state["demucs"] = {"status": "done", "model": config.demucs_model_name, "artifacts": stem_paths, "signature": demucs_signature}
             write_json_atomic(song_dir / "preprocessing.json", {"status": "demucs_ready", "demucs": stage_state["demucs"], "artifacts": stem_paths, "config": config.as_dict()})
-    elif "ctc" in stages:
+    elif "ctc" in stages or config.offset_acoustic_verify:
         # Permit a two-step workflow: callers may run Demucs once with
         # ``keep_vocals=True`` and invoke CTC later.  Reuse the persisted stem
         # only when it is still present; a previous CTC run with temporary
@@ -596,27 +613,35 @@ def prepare_song(
         line for line in line_values
         if line.get("status") != "non_sung" and line.get("reading")
     ]
+    if not reading_reusable:
+        stage_state["reading"]["offset_audio_source"] = "vocals" if stem_paths.get("vocals") else "original"
     if reading_reusable and cached is not None:
         # Cached reading output already contains the effective, globally
         # shifted timestamps.  Re-estimating and applying the offset during a
         # Demucs-only or CTC-only rerun would shift the same lines twice.
         cached_offset = int(cached.timing.get("global_offset_ms") or 0)
-        offset = {
-            "offset_ms": cached_offset,
-            "status": cached.timing.get("offset_status", "cached"),
-            "cached": True,
-        }
+        offset = dict(cached.timing.get("diagnostics") or {})
+        offset.update(offset_ms=cached_offset, status=cached.timing.get("offset_status", "cached"), cached=True)
     elif config.enable_offset and offset_lines:
         try:
             offset = estimate_offset(
                 offset_audio,
                 [int(line["start_ms"]) for line in offset_lines],
                 config,
+                lines=offset_lines,
+                vocal=bool(stem_paths.get("vocals")),
             )
         except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
             # Offset correction is an enhancement; malformed/unavailable audio
             # must not prevent generation of the reading baseline.
             offset = {"offset_ms": 0, "status": "error", "error": str(exc), "candidates": []}
+        if config.offset_acoustic_verify:
+            if not stem_paths.get("vocals"):
+                raise StageUnavailableError("offset acoustic verification requires a retained or newly separated vocal stem")
+            from .offset_verify import verify_offset
+            if progress:
+                progress("offset_verify", 0.0, "verifying global offset candidates")
+            offset = verify_offset(offset_audio, offset_lines, offset, config)
     else:
         offset = {"offset_ms": 0, "status": "disabled", "candidates": []}
     global_offset = int(offset.get("offset_ms") or 0)
@@ -671,6 +696,10 @@ def prepare_song(
                 except FileNotFoundError:
                     pass
                 stem_paths["vocals"] = None
+    elif not config.keep_vocals and stem_paths.get("vocals") and ("demucs" in stages or config.offset_acoustic_verify):
+        # Offset-only enhancement also honors the temporary-vocal policy.
+        (song_dir / stem_paths["vocals"]).unlink(missing_ok=True)
+        stem_paths["vocals"] = None
     line_values = _apply_timing_policy(line_values)
     for line in line_values:
         line["display_units"] = _build_display_units(line)

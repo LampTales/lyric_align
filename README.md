@@ -18,7 +18,7 @@ received the same end-to-end validation.
 
 - [LIBRARY.md](LIBRARY.md): public API, input/output schema, and caller contract
 - [PIPELINE.md](PIPELINE.md): pipeline stages, timing semantics, fallback, and caching
-- [RESEARCH.md](RESEARCH.md): background research and design history
+- [docs/](docs/README.md): canonical design and experiment notes
 - [temp/README.md](temp/README.md): local scratch-data policy
 
 ## Installation

@@ -44,6 +44,8 @@ not need to modify internal modules. The main controls are:
 | execution | `device`, `ffmpeg_path`, `sample_rate` |
 | Demucs/output | `demucs_model_name`, `keep_vocals`, `keep_instrumental`, `vocals_format`, `instrumental_format`, `vocals_bitrate`, `instrumental_bitrate` |
 | offset | `enable_offset`, `offset_low_ms`, `offset_high_ms`, `offset_step_ms` |
+| offset boundaries | `offset_boundary_check` (true), `offset_silence_ms` (2000), `offset_sustain_ms` (200), `offset_boundary_tolerance_ms` (800) |
+| experimental offset verification | `offset_acoustic_verify` (false), `offset_acoustic_min_margin` (0.15) |
 | CTC | `ctc_margin_ms`, `ctc_score_threshold` |
 
 `ModelPaths` keeps model resources independent. CTC and Demucs objects are
@@ -91,8 +93,47 @@ conversion.
 Offset estimation is enabled by default and searches the configured bounded
 window. If audio decoding fails, the artifact is still produced with
 `offset_status="error"` and a zero offset; offset correction is an enhancement
-and never blocks baseline reading generation. Use `enable_offset=False` when a
+and normally does not block baseline reading generation. Explicit acoustic
+verification has stricter resource requirements described below. Use `enable_offset=False` when a
 caller supplies its own timing anchors.
+
+With vocal stems, the default boundary check filters energy candidates using
+sustained vocal onsets after long silences. It associates the first vocal onset
+only with the first sung lyric, within the configured offset search range.
+Later onsets require a unique nearby lyric and an explicit gap of at least
+`offset_silence_ms` between the source lyric intervals. A gap between sentence
+starts alone is insufficient: an internal lyric pause is not a new boundary.
+Ambiguous events are skipped. Each anchor allows its onset-to-source-start
+difference plus/minus `offset_boundary_tolerance_ms`; conflicting anchors
+return zero/uncertain. Surviving candidates still face the original energy
+gain and peak-margin gates. Without reliable anchors, the original energy
+decision remains; mixed audio skips the boundary check explicitly. This is an
+energy heuristic and cannot identify unmarked humming or separation leakage.
+
+Set `offset_acoustic_verify=True` (CLI: `--offset-acoustic-verify`) to enable
+an **experimental, conservative veto** before any lyric timestamps are shifted.
+It needs an existing or newly separated vocal stem and a local CTC model;
+missing resources/model failures are reported, never silently treated as a
+successful verification. It compares the proposed offset, zero and at most one
+separated energy competitor on the same first/middle/last eligible lyrics
+(at most three lyrics, each 0.5–6 seconds). Raw token emission log probabilities
+are scored before activity clipping or display repair. Against every competitor,
+at least two valid paired lyrics are required and two thirds must support the
+proposal by `offset_acoustic_min_margin`. Ties or insufficient support give
+zero/uncertain; this step never chooses a replacement offset or writes token
+times. A zero proposal skips model inference. Loaded CTC weights are reused
+by the later alignment stage.
+
+This optional check can reject correct offsets: real-sample validation rejected
+both Reol's incorrect -1680 ms and Tanaka's listener-confirmed +880 ms. Leave
+it disabled for the validated default behavior. Its scores are diagnostics,
+not calibrated probabilities of lyric correctness.
+
+`timing.diagnostics.boundary_check` records anchors, skipped events, the raw
+energy winner and rejected candidates; `acoustic_verification` records sampled
+source indices, scores, votes, decision and elapsed time when enabled.
+To compare policies, use `--disable-offset-boundary-check`; to disable all
+automatic shifts, use `--disable-offset`.
 
 Each line may also contain `surface_spans`. A span maps a displayed substring
 to a reading substring, generated romaji and the corresponding mora indices.
@@ -134,6 +175,15 @@ the reading stage invalidates its dependent CTC result. A completed Demucs
 stage is independently reusable when its retained compressed stem files and
 stage signature are valid. Demucs is not resumed mid-song; interrupted or
 incomplete files are regenerated atomically.
+
+The internal cache policy marker invalidates older reading/CTC results when
+processing policy changes. Offset policy
+and relevant model settings participate in the reading signature. A mix-based
+reading estimate is reconsidered when requesting vocal stages. Reused reading
+timestamps are already shifted; partial reruns preserve the offset diagnostics
+and never apply the shift twice. Offset verification is recomputed after an
+interruption unless a completed matching artifact exists. This does not add a
+new checkpoint or change the alignment schema.
 
 For a split workflow, run Demucs with `keep_vocals=True` and later request
 `stages=("reading", "ctc")`; the persisted vocal stem is discovered from

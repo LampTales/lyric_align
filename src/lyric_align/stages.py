@@ -428,3 +428,49 @@ def align_ctc(
             if progress:
                 progress(completed / max(1, len(alignable)), f"aligned line {completed}/{len(alignable)}")
     return output
+
+
+def score_offset_candidates(
+    audio_path: Path, lines: list[dict[str, Any]], offsets: list[int], config: AlignmentConfig,
+) -> list[dict[str, Any]]:
+    """Score fixed lyric/offset windows without display repair or time writes.
+
+    Token emission scores avoid counting high-probability blanks as evidence
+    that the supplied lyric was sung. This reuses the later CTC model cache.
+    """
+    import math
+    try:
+        processor, model, torch = _load_ctc_bundle(str(config.models.ctc_model_path), config.device)
+    except (ImportError, OSError) as exc:
+        raise StageUnavailableError(f"offset acoustic verification unavailable: {exc}") from exc
+    audio = _decode_audio(audio_path, config.ffmpeg_path, config.sample_rate)
+    vocab = processor.tokenizer.get_vocab()
+    blank = int(processor.tokenizer.pad_token_id or 0)
+    results = []
+    with torch.inference_mode():
+        for offset in offsets:
+            scores: list[float | None] = []
+            reasons = []
+            for line in lines:
+                left = round((int(line["start_ms"]) + offset) * config.sample_rate / 1000)
+                right = round((int(line["end_ms"]) + offset) * config.sample_rate / 1000)
+                reading = str(line["reading"])
+                target = [int(vocab[c]) for c in reading if c in vocab]
+                if left < 0 or right > len(audio) or right <= left or not target or len(target) / len(reading) < config.ctc_coverage_threshold:
+                    scores.append(None)
+                    reasons.append("invalid_window_or_vocabulary")
+                    continue
+                inputs = processor(audio[left:right], sampling_rate=config.sample_rate, return_tensors="pt")
+                logits = model(inputs.input_values.to(config.device)).logits[0]
+                log_probs = torch.log_softmax(logits, dim=-1)
+                spans, _ = _forced_align(log_probs, target, blank)
+                if any(b <= a for a, b in spans):
+                    scores.append(None)
+                    reasons.append("collapsed_raw_alignment")
+                    continue
+                emissions = [float(log_probs[a:b, token].mean().item()) for token, (a, b) in zip(target, spans)]
+                score = sum(emissions) / len(emissions)
+                scores.append(score if math.isfinite(score) else None)
+                reasons.append(None if math.isfinite(score) else "non_finite_score")
+            results.append({"offset_ms": offset, "line_scores": scores, "invalid_reasons": reasons})
+    return results

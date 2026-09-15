@@ -38,6 +38,12 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--offset-high-ms", type=int, default=2000)
     prepare.add_argument("--offset-step-ms", type=int, default=40)
     prepare.add_argument("--disable-offset", action="store_true", help="do not estimate a song-level lyric offset")
+    prepare.add_argument("--disable-offset-boundary-check", action="store_true", help="skip conservative vocal intro/interlude checks")
+    prepare.add_argument("--offset-silence-ms", type=int, default=2000)
+    prepare.add_argument("--offset-sustain-ms", type=int, default=200)
+    prepare.add_argument("--offset-boundary-tolerance-ms", type=int, default=800)
+    prepare.add_argument("--offset-acoustic-verify", action="store_true", help="experimental CTC offset veto; may reject correct offsets (requires vocals and a CTC model)")
+    prepare.add_argument("--offset-acoustic-min-margin", type=float, default=0.15)
     prepare.add_argument("--stages", nargs="+", choices=("reading", "demucs", "ctc"), default=["reading"], help="stages to run; demucs and ctc require their separate model paths")
     args = parser.parse_args(argv)
     if args.command == "validate":
@@ -62,6 +68,12 @@ def main(argv: list[str] | None = None) -> int:
         offset_high_ms=args.offset_high_ms,
         offset_step_ms=args.offset_step_ms,
         enable_offset=not args.disable_offset,
+        offset_boundary_check=not args.disable_offset_boundary_check,
+        offset_silence_ms=args.offset_silence_ms,
+        offset_sustain_ms=args.offset_sustain_ms,
+        offset_boundary_tolerance_ms=args.offset_boundary_tolerance_ms,
+        offset_acoustic_verify=args.offset_acoustic_verify,
+        offset_acoustic_min_margin=args.offset_acoustic_min_margin,
         models=ModelPaths(
             demucs_model_path=args.demucs_model_path,
             ctc_model_path=args.ctc_model_path,

@@ -60,6 +60,12 @@ class AlignmentConfig:
     offset_high_ms: int = 2_000
     offset_step_ms: int = 40
     enable_offset: bool = True
+    offset_boundary_check: bool = True
+    offset_silence_ms: int = 2000
+    offset_sustain_ms: int = 200
+    offset_boundary_tolerance_ms: int = 800
+    offset_acoustic_verify: bool = False
+    offset_acoustic_min_margin: float = 0.15
     ctc_margin_ms: int = 500
     # Activity endpoints are used to narrow CTC only when the detector is
     # sufficiently confident.  A small margin protects consonants at the
@@ -68,10 +74,9 @@ class AlignmentConfig:
     activity_confidence_threshold: float = 0.45
     ctc_score_threshold: float = -1.5
     ctc_coverage_threshold: float = 0.8
-    # Bump when deterministic post-processing changes invalidate cached
-    # alignment.json files (0.9 projects unmapped display characters into
-    # neighbouring alignment gaps before the overlap safety pass).
-    pipeline_version: str = "0.9"
+    # Change this internal cache marker when processing policy changes
+    # invalidate cached alignments. It is not the Python package version.
+    pipeline_version: str = "0.10"
 
     def __post_init__(self) -> None:
         if self.g2p_backend not in {"openjtalk", "sudachi", "pykakasi"}:
@@ -82,6 +87,14 @@ class AlignmentConfig:
             raise ValueError("offset_low_ms must not exceed offset_high_ms")
         if self.offset_step_ms <= 0:
             raise ValueError("offset_step_ms must be positive")
+        if self.offset_silence_ms <= 0 or self.offset_sustain_ms <= 0:
+            raise ValueError("offset silence/sustain durations must be positive")
+        if self.offset_boundary_tolerance_ms < 0:
+            raise ValueError("offset_boundary_tolerance_ms must not be negative")
+        if not math.isfinite(self.offset_acoustic_min_margin) or self.offset_acoustic_min_margin <= 0:
+            raise ValueError("offset_acoustic_min_margin must be finite and positive")
+        if self.offset_acoustic_verify and (not self.enable_offset or self.models.ctc_model_path is None):
+            raise ValueError("offset_acoustic_verify requires enable_offset and ctc_model_path")
         if self.ctc_margin_ms < 0:
             raise ValueError("ctc_margin_ms must not be negative")
         if self.ctc_activity_margin_ms < 0:
@@ -115,6 +128,12 @@ class AlignmentConfig:
                 "step_ms": self.offset_step_ms,
             },
             "enable_offset": self.enable_offset,
+            "offset_boundary_check": self.offset_boundary_check,
+            "offset_silence_ms": self.offset_silence_ms,
+            "offset_sustain_ms": self.offset_sustain_ms,
+            "offset_boundary_tolerance_ms": self.offset_boundary_tolerance_ms,
+            "offset_acoustic_verify": self.offset_acoustic_verify,
+            "offset_acoustic_min_margin": self.offset_acoustic_min_margin,
             "ctc_margin_ms": self.ctc_margin_ms,
             "ctc_activity_margin_ms": self.ctc_activity_margin_ms,
             "activity_confidence_threshold": self.activity_confidence_threshold,

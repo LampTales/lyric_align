@@ -1,21 +1,15 @@
-# Changelog
+# 开发变更记录
 
-## 0.1.0
+本项目目前处于快速迭代阶段，尚未建立严格的包版本和发布节奏。本文件只记录
+值得回顾的实现变化，不把条目解释为正式版本发布。
 
-- Initial installable `lyric_align` package and CLI.
-- Japanese G2P backends: OpenJTalk, Sudachi and pykakasi.
-- Versioned `alignment.json` with reading, romaji, surface spans and mora
-  timing.
-- Optional Demucs vocal separation and compressed instrumental output.
-- Optional Japanese wav2vec2 CTC forced alignment with deterministic quality
-  fallback and song-level offset estimation.
-- Stage-aware caching and temporary vocal-stem cleanup.
+## 当前开发线
 
-The pipeline version recorded in artifacts is currently `0.9`; it includes
-post-processing that repairs collapsed CTC token spans for continuous display,
-stable mixed-language display mapping, pronunciation filtering for
-non-Japanese surface text, and splitting of overlapping display-unit
-intervals into sequential character ranges. Unmapped punctuation and
-omitted-language fragments are assigned to local gaps bounded by aligned
-neighbours before that safety pass, keeping the renderer-facing contract
-sequential without changing CTC/mora timing.
+- 增加人声开头和间奏边界约束，减少明显错误的全局 offset。
+- 增加可选的实验性 CTC offset 验证，默认关闭。
+- 将 offset 策略、人声来源和相关模型设置纳入阶段缓存签名。
+- 保留完整 offset 诊断，并避免重启或部分续跑时重复应用位移。
+- 增加 CTC 零时长 span 的确定性显示修补、混合语言显示映射和非日语表面文本过滤。
+
+`AlignmentArtifact.schema_version` 是产物格式字段；配置中的内部缓存策略标记只用于
+判断已有结果是否需要重算。两者都不代表 Python 包的正式发布版本。
