@@ -22,6 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--demucs-model-path", type=Path)
     prepare.add_argument("--demucs-model-name", default="htdemucs")
     prepare.add_argument("--ctc-model-path", type=Path)
+    prepare.add_argument("--ctc-profile", choices=("japanese", "nextfire"), default="japanese")
     prepare.add_argument("--device", default="cpu")
     prepare.add_argument("--ffmpeg-path", default="ffmpeg")
     prepare.add_argument("--keep-vocals", action="store_true", help="retain the vocal stem after CTC")
@@ -62,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         instrumental_bitrate=args.instrumental_bitrate,
         sample_rate=args.sample_rate,
         ctc_margin_ms=args.ctc_margin_ms,
+        ctc_profile=args.ctc_profile,
         ctc_score_threshold=args.ctc_score_threshold,
         ctc_coverage_threshold=args.ctc_coverage_threshold,
         offset_low_ms=args.offset_low_ms,

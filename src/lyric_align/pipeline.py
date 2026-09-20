@@ -43,6 +43,7 @@ def _stage_signature(config: AlignmentConfig, stage: str) -> str:
             "offset_ctc_model_path": str(config.models.ctc_model_path) if config.offset_acoustic_verify else None,
             "offset_ctc_coverage": config.ctc_coverage_threshold if config.offset_acoustic_verify else None,
             "offset_device": config.device if config.offset_acoustic_verify else None,
+            "offset_ctc_profile": config.ctc_profile if config.offset_acoustic_verify else None,
         }
     elif stage == "demucs":
         values = {"demucs_model_name": config.demucs_model_name, "demucs_model_path": str(config.models.demucs_model_path) if config.models.demucs_model_path else None, "device": config.device, "keep_vocals": config.keep_vocals, "keep_instrumental": config.keep_instrumental, "vocals_format": config.vocals_format, "instrumental_format": config.instrumental_format, "vocals_bitrate": config.vocals_bitrate, "instrumental_bitrate": config.instrumental_bitrate}
@@ -50,6 +51,8 @@ def _stage_signature(config: AlignmentConfig, stage: str) -> str:
         values = {"ctc_model_path": str(config.models.ctc_model_path) if config.models.ctc_model_path else None, "device": config.device, "sample_rate": config.sample_rate, "ctc_margin_ms": config.ctc_margin_ms, "ctc_activity_margin_ms": config.ctc_activity_margin_ms, "activity_confidence_threshold": config.activity_confidence_threshold, "ctc_score_threshold": config.ctc_score_threshold, "ctc_coverage_threshold": config.ctc_coverage_threshold, "pipeline_version": config.pipeline_version}
     else:
         values = config.as_dict()
+    if stage == "ctc":
+        values["ctc_profile"] = config.ctc_profile
     payload = json.dumps(values, ensure_ascii=False, sort_keys=True).encode()
     return hashlib.sha256(payload).hexdigest()
 
@@ -156,6 +159,7 @@ def _build_display_units(line: dict[str, Any]) -> list[dict[str, Any]]:
                 source_to_ctc.setdefault(int(source_index), []).append(ctc_index)
     units: list[dict[str, Any]] = []
     previous_start = start
+    nextfire = (line.get("ctc_window") or {}).get("profile") == "nextfire"
     order_repaired = False
     for index, char in enumerate(text):
         span = next(
@@ -172,11 +176,11 @@ def _build_display_units(line: dict[str, Any]) -> list[dict[str, Any]]:
             if a <= index < b:
                 source_values = [int(value) for value in (span.get("mora_indices") or [])]
                 if has_mora_source_map:
-                    values = [
+                    values = sorted({
                         ctc_index
                         for source_index in source_values
                         for ctc_index in source_to_ctc.get(source_index, [])
-                    ]
+                    })
                 else:
                     values = [value for value in source_values if 0 <= value < len(mora)]
                 if values:
@@ -187,6 +191,16 @@ def _build_display_units(line: dict[str, Any]) -> list[dict[str, Any]]:
                         hi = min(len(values), lo + 1)
                     indices = values[lo:hi] or [values[min(lo, len(values) - 1)]]
                 break
+        # NextFire may retain an English word's spelling while Sudachi gave
+        # it several kana mora. Its explicit surface range is authoritative,
+        # including when removal of spaces joined several Latin readings.
+        surface_matches = [
+            i for i, item in enumerate(mora)
+            if "source_surface_start" in item
+            and int(item["source_surface_start"]) <= index < int(item["source_surface_end"])
+        ]
+        if surface_matches:
+            indices = surface_matches
         # A token with no reading (most punctuation) is intentionally absent
         # from the mora timeline.  Do not attach it to a proportional mora;
         # that would make punctuation inherit an unrelated sung interval and
@@ -213,7 +227,7 @@ def _build_display_units(line: dict[str, Any]) -> list[dict[str, Any]]:
         # allowed to fall behind the previous aligned onset here.  Keep the
         # monotonicity repair for actual mora mappings and metadata-free
         # legacy fallbacks only.
-        if a < previous_start and not (span and not indices):
+        if a < previous_start and not nextfire and not (span and not indices):
             order_repaired = True
             # Prefer the character's sentence-relative position over a stale
             # CTC mora index. This gives an omitted final symbol a useful
@@ -253,8 +267,20 @@ def _build_display_units(line: dict[str, Any]) -> list[dict[str, Any]]:
     # across the complete sentence.  This keeps the CTC/mora boundaries intact
     # and makes the source of the timing explicit: alignment still owns all
     # lyric times; this is only a display-character projection.
-    unmapped_repaired = _fill_unmapped_display_unit_gaps(units, start, end)
+    unmapped_repaired = _fill_unmapped_display_unit_gaps(units, start, end, include_whitespace=nextfire)
     overlap_repaired = _split_overlapping_display_units(units)
+    # A mapped English fragment can overlap a neighbouring Japanese mora
+    # after both local repairs. The renderer contract is strictly monotonic;
+    # make this final projection deterministic while retaining each interval
+    # as much as the line window permits.
+    previous = start
+    for unit in units:
+        a = max(previous, min(end, int(unit.get("start_ms", previous))))
+        b = max(a, min(end, int(unit.get("end_ms", a))))
+        if (a, b) != (unit["start_ms"], unit["end_ms"]):
+            order_repaired = True
+        unit["start_ms"], unit["end_ms"] = a, b
+        previous = a
     if order_repaired or unmapped_repaired or overlap_repaired:
         warnings = line.setdefault("warnings", [])
         messages = ["display unit timing repaired for monotonicity"] if order_repaired else []
@@ -268,7 +294,7 @@ def _build_display_units(line: dict[str, Any]) -> list[dict[str, Any]]:
     return units
 
 
-def _fill_unmapped_display_unit_gaps(units: list[dict[str, Any]], start: int, end: int) -> bool:
+def _fill_unmapped_display_unit_gaps(units: list[dict[str, Any]], start: int, end: int, *, include_whitespace: bool = False) -> bool:
     """Project unaligned visible characters into neighbouring timing gaps.
 
     CTC deliberately filters symbols that are not in its vocabulary, while G2P
@@ -283,14 +309,14 @@ def _fill_unmapped_display_unit_gaps(units: list[dict[str, Any]], start: int, en
     index = 0
     while index < len(units):
         item = units[index]
-        if item.get("mora_indices") or not str(item.get("text") or "").strip():
+        if item.get("mora_indices") or (not include_whitespace and not str(item.get("text") or "").strip()):
             index += 1
             continue
         run_end = index + 1
         while (
             run_end < len(units)
             and not units[run_end].get("mora_indices")
-            and str(units[run_end].get("text") or "").strip()
+            and (include_whitespace or str(units[run_end].get("text") or "").strip())
         ):
             run_end += 1
 

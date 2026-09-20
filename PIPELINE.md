@@ -296,3 +296,13 @@ python ctc_mora.py --input results/ctc_<name>.json \
 ```
 
 所有结果目录都可删除后重建；样本、模型和中间音频由 `.gitignore` 排除，不应写入生产 Git 提交。
+
+### NextFire Latin target profile
+
+When `AlignmentConfig.ctc_profile="nextfire"`, CTC targets are generated
+separately from the display reading. Japanese morae are converted to Latin
+letters, while Latin words use their surface spelling; punctuation and spaces
+are omitted. Each target letter retains source reading and surface indices, so
+the resulting mora/display units can still highlight the original lyric. The
+default `japanese` profile and its kana targets are unchanged. The selected
+profile is part of the CTC cache signature and is recorded in `ctc_window`.

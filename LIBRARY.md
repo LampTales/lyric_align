@@ -46,7 +46,7 @@ not need to modify internal modules. The main controls are:
 | offset | `enable_offset`, `offset_low_ms`, `offset_high_ms`, `offset_step_ms` |
 | offset boundaries | `offset_boundary_check` (true), `offset_silence_ms` (2000), `offset_sustain_ms` (200), `offset_boundary_tolerance_ms` (800) |
 | experimental offset verification | `offset_acoustic_verify` (false), `offset_acoustic_min_margin` (0.15) |
-| CTC | `ctc_margin_ms`, `ctc_score_threshold` |
+| CTC | `ctc_profile` (`japanese` by default, `nextfire` for the NextFire Latin target), `ctc_margin_ms`, `ctc_score_threshold` |
 
 `ModelPaths` keeps model resources independent. CTC and Demucs objects are
 cached by resolved model path and device inside each Python process, so a
@@ -89,6 +89,16 @@ conversion.
 - `stages`: per-stage status and diagnostics;
 - `models`: the independently supplied resource paths/provenance;
 - `artifacts`: relative stem and preprocessing paths, or `null` when absent.
+
+The `nextfire` CTC profile is explicit and opt-in. It uses the downloaded
+NextFire MMS-300M checkpoint's lowercase Latin vocabulary: Japanese readings
+are romanized, Latin words retain their surface spelling, and punctuation or
+spaces are omitted from the acoustic target. Source reading and surface indices
+are retained in `tokens` and `mora`; the displayed lyric remains unchanged.
+This is a text-target policy, not an automatic model download or a claim that
+English singing is accurately recognized. The profile and target are recorded
+in each line's `ctc_window` and included in the stage cache signature.
+
 
 Offset estimation is enabled by default and searches the configured bounded
 window. If audio decoding fails, the artifact is still produced with

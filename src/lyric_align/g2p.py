@@ -107,7 +107,12 @@ def convert(text: str, backend: str) -> dict[str, Any]:
             raise RuntimeError("sudachipy and sudachidict are required for g2p_backend=sudachi") from exc
         sudachi = dictionary.Dictionary().create()
         tokens = sudachi.tokenize(text, tokenizer.Tokenizer.SplitMode.C)
-        data = [{"surface": token.surface(), "reading": kata_to_hira(token.reading_form())} for token in tokens]
+        data = []
+        for token in tokens:
+            item = {"surface": token.surface(), "reading": kata_to_hira(token.reading_form())}
+            if token.part_of_speech()[0] == "助詞" and token.surface() in {"は", "へ", "を"}:
+                item["alignment_reading"] = {"は": "わ", "へ": "え", "を": "お"}[token.surface()]
+            data.append(item)
         return {"reading": "".join(item["reading"] for item in data), "backend": backend, "tokens": data}
     if backend == "openjtalk":
         try:
@@ -151,6 +156,8 @@ def build_surface_spans(text: str, reading: str, tokens: list[dict[str, str]] | 
                 spans.append(_surface_span(text, index + surface_start, index + surface_start + 1, reading, a, b, "high" if len(surface) == 1 else confidence))
         else:
             spans.append(_surface_span(text, surface_start, surface_end, reading, read_start, read_end, "low"))
+        if len(surface) == 1 and token.get("alignment_reading"):
+            spans[-1]["alignment_reading"] = token["alignment_reading"]
         surface_offset, reading_offset = surface_end, read_end
     if spans:
         return spans

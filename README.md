@@ -99,6 +99,21 @@ lyric-align prepare \
   --ctc-model-path /models/wav2vec2-japanese
 ```
 
+To use the downloaded NextFire karaoke checkpoint, select its explicit Latin
+target profile (the model path alone does not change lyric conversion):
+
+```bash
+lyric-align prepare --song-dir /data/song --stages reading demucs ctc \
+  --demucs-model-path /models/demucs/htdemucs \
+  --ctc-model-path /ref/mms-300m-ForcedAligner-karaoke-ja-Latn \
+  --ctc-profile nextfire
+```
+
+This retains the displayed lyric text and Japanese reading metadata, while
+building a Latin alignment target. English words retain their surface spelling
+in this baseline; inspect `ctc_window` and `warnings` before accepting a low
+confidence result.
+
 CTC checkpoints are opened with Transformers' `local_files_only=True`.
 Hugging Face Demucs snapshots are also resolved with offline mode enabled, so
 a missing model produces a local error instead of an implicit download.

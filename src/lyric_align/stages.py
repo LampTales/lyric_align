@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import AlignmentConfig
+from .ctc_text import build_target, group_nextfire_tokens
 from .exceptions import StageUnavailableError
 from .g2p import SMALL, split_mora
 ProgressCallback = Callable[[float, str], None]
@@ -288,43 +289,43 @@ def _forced_align(log_probs: Any, target: list[int], blank: int) -> tuple[list[t
     )
     if int(log_probs.shape[0]) < minimum_frames:
         return [(0, 0) for _ in target], -1e9
-    import torch
+    import numpy as np
 
-    extended = [blank]
-    for value in target:
-        extended.extend((value, blank))
-    frame_count, state_count = log_probs.shape[0], len(extended)
-    dp = torch.full((frame_count, state_count), -1e9)
-    back = torch.zeros((frame_count, state_count), dtype=torch.int8)
-    dp[0, 0] = log_probs[0, blank]
-    if state_count > 1:
-        dp[0, 1] = log_probs[0, extended[1]]
+    # One CPU transfer, then vectorize states at each frame. Romanized targets
+    # contain several times as many labels as kana; scalar torch indexing in
+    # the nested frame/state loop is prohibitively slow (especially on GPU).
+    probs = log_probs.detach().float().cpu().numpy() if hasattr(log_probs, "detach") else np.asarray(log_probs)
+    extended = np.array([blank] + [x for value in target for x in (value, blank)])
+    frame_count, state_count = probs.shape[0], len(extended)
+    previous = np.full(state_count, -np.inf)
+    previous[:2] = probs[0, extended[:2]]
+    back = np.zeros((frame_count, state_count), dtype=np.int8)
+    skip = np.zeros(state_count, dtype=bool)
+    skip[2:] = (extended[2:] != blank) & (extended[2:] != extended[:-2])
+    states_index = np.arange(state_count)
     for frame in range(1, frame_count):
-        for state in range(state_count):
-            choices = [(dp[frame - 1, state], 0)]
-            if state:
-                choices.append((dp[frame - 1, state - 1], 1))
-            if state > 1 and extended[state] != blank and extended[state] != extended[state - 2]:
-                choices.append((dp[frame - 1, state - 2], 2))
-            value, move = max(choices, key=lambda item: float(item[0]))
-            dp[frame, state] = value + log_probs[frame, extended[state]]
-            back[frame, state] = move
-    state = state_count - 1
-    states = []
+        choices = np.full((3, state_count), -np.inf)
+        choices[0] = previous
+        choices[1, 1:] = previous[:-1]
+        choices[2, 2:] = np.where(skip[2:], previous[:-2], -np.inf)
+        moves = choices.argmax(axis=0)
+        previous = choices[moves, states_index] + probs[frame, extended]
+        back[frame] = moves
+    # CTC accepts both the final label and final blank; requiring a trailing
+    # blank incorrectly shortens a sustained final vowel at the crop edge.
+    state = state_count - 1 if previous[-1] >= previous[-2] else state_count - 2
+    score = float(previous[state] / frame_count)
+    if not np.isfinite(score):
+        return [(0, 0) for _ in target], -1e9
+    path = np.empty(frame_count, dtype=int)
     for frame in range(frame_count - 1, -1, -1):
-        if state < 0 or state >= state_count:
-            return [(0, 0) for _ in target], -1e9
-        states.append(state)
+        path[frame] = state
         state -= int(back[frame, state])
-        if state < 0 and frame > 0:
-            return [(0, 0) for _ in target], -1e9
-    states.reverse()
     spans = []
     for index in range(len(target)):
-        symbol_state = 1 + 2 * index
-        frames = [frame for frame, current in enumerate(states) if current == symbol_state]
-        spans.append((frames[0], frames[-1] + 1) if frames else (0, 0))
-    return spans, float(dp[-1, -1].item() / max(1, frame_count))
+        frames = np.flatnonzero(path == 1 + 2 * index)
+        spans.append((int(frames[0]), int(frames[-1]) + 1) if len(frames) else (0, 0))
+    return spans, score
 
 
 def align_ctc(
@@ -346,6 +347,11 @@ def align_ctc(
     audio = _decode_audio(Path(vocal_path), config.ffmpeg_path, config.sample_rate)
     vocab = processor.tokenizer.get_vocab()
     blank = int(processor.tokenizer.pad_token_id or 0)
+    if config.ctc_profile == "nextfire" and (not all(c in vocab for c in "abcdefghijklmnopqrstuvwxyz") or blank in [vocab[c] for c in "abcdefghijklmnopqrstuvwxyz"]):
+        raise StageUnavailableError("nextfire profile requires a Latin-letter CTC vocabulary and separate blank")
+    expected_rate = getattr(processor.feature_extractor, "sampling_rate", config.sample_rate)
+    if config.sample_rate != expected_rate:
+        raise StageUnavailableError(f"CTC model requires sample_rate={expected_rate}")
     output = []
     alignable = [line for line in lines if line.get("reading") and line.get("status") != "non_sung"]
     completed = 0
@@ -374,46 +380,40 @@ def align_ctc(
             left = max(0, int((window_start - search_margin) * config.sample_rate / 1000))
             right = min(len(audio), int((window_end + search_margin) * config.sample_rate / 1000))
             segment = audio[left:right]
-            inputs = processor(segment, sampling_rate=config.sample_rate, return_tensors="pt")
-            logits = model(inputs.input_values.to(config.device)).logits[0]
-            log_probs = torch.log_softmax(logits, dim=-1)
-            reading = str(line["reading"])
-            original_mora_indices: list[int | None] = [None] * len(reading)
-            reading_cursor = 0
-            for mora_index, mora in enumerate(split_mora(reading)):
-                position = reading.find(mora, reading_cursor)
-                if position < 0:
-                    continue
-                for offset in range(position, min(len(reading), position + len(mora))):
-                    original_mora_indices[offset] = mora_index
-                reading_cursor = position + len(mora)
-            char_records = [
-                (reading_index, char, original_mora_indices[reading_index] if reading_index < len(original_mora_indices) else None)
-                for reading_index, char in enumerate(reading)
-                if char in vocab
-            ]
-            chars = [char for _, char, _ in char_records]
+            char_records, coverage, target_text = build_target(line, config.ctc_profile, vocab)
+            chars = [record["text"] for record in char_records]
             target = [int(vocab[char]) for char in chars]
+            if len(segment) < 400 or not target:
+                updated = dict(line, alignment_status="fallback", coverage=coverage, tokens=[], ctc_score=-1e9)
+                updated["ctc_window"] = {"start_ms": window_start, "end_ms": window_end, "source": window_source,
+                                         "profile": config.ctc_profile, "target": target_text}
+                updated["warnings"] = list(line.get("warnings") or []) + ["CTC empty target or audio shorter than model receptive field"]
+                output.append(updated)
+                completed += 1
+                continue
+            inputs = processor(segment, sampling_rate=config.sample_rate, return_tensors="pt")
+            logits = model(**{key: value.to(config.device) for key, value in inputs.items()}).logits[0]
+            log_probs = torch.log_softmax(logits, dim=-1)
             spans, score = _forced_align(log_probs, target, blank)
             ratio = (len(segment) * 1000 / config.sample_rate) / max(1, logits.shape[0])
             tokens = []
-            for (reading_index, char, source_mora_index), (a, b) in zip(char_records, spans):
+            for record, (a, b) in zip(char_records, spans):
+                char = record["text"]
                 raw_start = round(left * 1000 / config.sample_rate + a * ratio)
                 raw_end = round(left * 1000 / config.sample_rate + b * ratio)
                 token_start = max(start, min(end, raw_start))
                 token_end = max(token_start, min(end, raw_end))
                 confidence = log_probs[a:b, vocab[char]].mean().item() if b > a else -99.0
-                tokens.append({"text": char, "start_ms": token_start, "end_ms": token_end, "frame_confidence": round(float(confidence), 3), "source_reading_index": reading_index, "source_mora_index": source_mora_index})
+                tokens.append({**record, "start_ms": token_start, "end_ms": token_end, "frame_confidence": round(float(confidence), 3)})
             tokens, repaired = _repair_token_spans(tokens, window_start, window_end)
-            coverage = len(tokens) / max(1, len(str(line["reading"])))
-            updated = dict(line)
+            updated = dict(line, warnings=list(line.get("warnings") or []))
             updated["ctc_score"] = round(score, 4)
             updated["tokens"] = tokens
-            updated["ctc_window"] = {"start_ms": window_start, "end_ms": window_end, "source": window_source}
+            updated["ctc_window"] = {"start_ms": window_start, "end_ms": window_end, "source": window_source, "profile": config.ctc_profile, "target": target_text}
             positive_ratio = sum(int(item["end_ms"] > item["start_ms"]) for item in tokens) / max(1, len(tokens))
             updated["alignment_status"] = "ctc" if coverage >= config.ctc_coverage_threshold and score >= config.ctc_score_threshold and positive_ratio >= 1.0 else "fallback"
             if updated["alignment_status"] == "ctc":
-                updated["mora"] = _group_ctc_mora(tokens)
+                updated["mora"] = group_nextfire_tokens(tokens) if config.ctc_profile == "nextfire" else _group_ctc_mora(tokens)
                 updated["coverage"] = round(coverage, 3)
                 updated["method"] = "demucs+ctc"
                 if repaired:
@@ -454,14 +454,14 @@ def score_offset_candidates(
             for line in lines:
                 left = round((int(line["start_ms"]) + offset) * config.sample_rate / 1000)
                 right = round((int(line["end_ms"]) + offset) * config.sample_rate / 1000)
-                reading = str(line["reading"])
-                target = [int(vocab[c]) for c in reading if c in vocab]
-                if left < 0 or right > len(audio) or right <= left or not target or len(target) / len(reading) < config.ctc_coverage_threshold:
+                records, coverage, _ = build_target(line, config.ctc_profile, vocab)
+                target = [int(vocab[record["text"]]) for record in records]
+                if left < 0 or right > len(audio) or right - left < 400 or not target or coverage < config.ctc_coverage_threshold:
                     scores.append(None)
                     reasons.append("invalid_window_or_vocabulary")
                     continue
                 inputs = processor(audio[left:right], sampling_rate=config.sample_rate, return_tensors="pt")
-                logits = model(inputs.input_values.to(config.device)).logits[0]
+                logits = model(**{key: value.to(config.device) for key, value in inputs.items()}).logits[0]
                 log_probs = torch.log_softmax(logits, dim=-1)
                 spans, _ = _forced_align(log_probs, target, blank)
                 if any(b <= a for a, b in spans):

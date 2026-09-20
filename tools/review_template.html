@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NextFire 歌词对照</title>
+<style>
+:root{color-scheme:dark}body{font:16px system-ui,sans-serif;background:#111820;color:#e0e6ed;max-width:1080px;margin:0 auto;padding:20px}h1{font-size:26px}p{line-height:1.6}.player{position:sticky;top:0;background:#17212cf5;padding:16px;z-index:2;border:1px solid #3b4a58;border-radius:10px}audio{width:100%;margin:10px 0}.controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap}button,select{font:inherit;padding:8px;background:#253545;color:inherit;border:1px solid #54677a;border-radius:6px}button{cursor:pointer}article{border:1px solid #364452;padding:18px;margin:18px 0;border-radius:10px;scroll-margin-top:250px}article.current{border-color:#73cfb6}article.past{opacity:.8}.lyrics{font-size:25px;line-height:1.9;white-space:pre-wrap;overflow-wrap:anywhere}.glyph{cursor:pointer}.glyph.done{color:#6bdbc0}.glyph.active{background:#a56224;color:white}.meta{color:#a5b6c7;font-size:14px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}.row{margin:14px 0}#error{color:#ffab95}#clock{font-variant-numeric:tabular-nums}@media(max-width:600px){body{padding:8px}.lyrics{font-size:21px}.player{padding:10px}article{scroll-margin-top:300px}}
+</style>
+<h1>NextFire / 当前日语模型</h1>
+<p>同一人声、同一歌词窗口，关闭全曲 offset。这里展示整首歌的全部歌词句子；默认整曲连续播放，音频会在句间继续播放。通过率是自动质量门结果，不是人工边界准确率，两模型分数尚未校准。</p>
+<section class="player">
+<div class="controls"><label>歌曲 <select id="song"></select></label><label>音轨 <select id="track"><option value="audio">原曲</option><option value="vocals">分离人声</option></select></label><label>速度 <select id="speed"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option></select></label></div>
+<audio id="audio" controls preload="metadata"></audio>
+<div class="controls"><button id="previous">上一句</button><button id="next">下一句</button><label>播放 <select id="mode"><option value="continuous">整曲连续</option><option value="once">单句试听</option><option value="loop">单句循环</option></select></label><label><input type="checkbox" id="follow" checked>跟随当前句</label><span id="clock">0.00s</span></div>
+<div class="controls"><label>时间轴 <select id="view"><option value="display_units">最终字符（含回退）</option><option value="tokens">原始字母 / 假名对齐</option></select></label><span id="status" class="meta"></span></div><div id="error" role="alert"></div>
+</section>
+<main id="lines"></main>
+<script id="data" type="application/json">__REVIEW_DATA__</script>
+<script>
+'use strict';
+const songs=JSON.parse(document.getElementById('data').textContent);
+const $=id=>document.getElementById(id), audio=$('audio');
+let currentSong=0, selectedLine=0, lastActive=-1, frame=0, mediaGeneration=0, pendingMetadata=null, pendingSeek=null;
+let cards=[], glyphs=[];
+const fmt=ms=>(ms/1000).toFixed(2)+'s';
+const song=()=>songs[currentSong];
+const pauseAtBoundary=()=>{
+  const row=song().lines[selectedLine];
+  if(!row || $('mode').value==='continuous' || audio.paused || audio.seeking || pendingSeek) return;
+  if(audio.currentTime*1000>=row.end_ms){
+    if($('mode').value==='loop') audio.currentTime=row.start_ms/1000;
+    else {audio.pause();audio.currentTime=row.end_ms/1000;}
+  }
+};
+function paint(){
+  pauseAtBoundary();
+  const t=audio.currentTime*1000;let active=-1;
+  cards.forEach((card,i)=>{const row=song().lines[i],on=t>=row.start_ms&&t<row.end_ms;
+    card.classList.toggle('current',on);card.classList.toggle('past',t>=row.end_ms);if(on) active=i;});
+  glyphs.forEach(({node,unit})=>{node.classList.toggle('done',t>=unit.end_ms);node.classList.toggle('active',t>=unit.start_ms&&t<unit.end_ms)});
+  $('clock').textContent=fmt(t)+' / '+(Number.isFinite(audio.duration)?fmt(audio.duration*1000):'--');
+  $('status').textContent=active>=0?'当前句 '+(active+1)+' / '+cards.length:'当前位置无歌词，音频继续播放';
+  if(active>=0 && active!==lastActive && $('follow').checked)cards[active].scrollIntoView({behavior:'smooth',block:'nearest'});
+  lastActive=active;
+}
+function tick(){paint();if(!audio.paused)frame=requestAnimationFrame(tick)}
+async function play(){try{await audio.play();$('error').textContent=''}catch(e){$('error').textContent='无法播放：'+e.message}}
+function seekTo(time,resume=true){
+  // Keep the latest user intent while metadata loads; never let the initial
+  // load callback overwrite a subsequent sentence/character click with zero.
+  pendingSeek={time,resume};
+  if(pendingMetadata || audio.readyState<1)return;
+  const request=pendingSeek;pendingSeek=null;
+  audio.currentTime=Math.max(0,Math.min(request.time,Number.isFinite(audio.duration)?audio.duration:request.time));
+  paint();if(request.resume)play();
+}
+function seekLine(index){selectedLine=Math.max(0,Math.min(song().lines.length-1,index));seekTo(song().lines[selectedLine].start_ms/1000)}
+function draw(){
+  $('lines').replaceChildren();cards=[];glyphs=[];
+  song().lines.forEach((row,i)=>{const card=document.createElement('article');card.dataset.index=i;
+    const h=document.createElement('h3');h.textContent=`${i+1}. ${row.text}`;card.append(h);
+    const button=document.createElement('button');button.textContent='从此句播放';button.onclick=()=>seekLine(i);card.append(button);
+    const label=document.createElement('span');label.className='meta';label.textContent=' '+fmt(row.start_ms)+' – '+fmt(row.end_ms);card.append(label);
+    ['japanese','nextfire'].forEach(profile=>{const result=row[profile],section=document.createElement('div');section.className='row';
+      const info=document.createElement('p');info.className='meta';info.textContent=(profile==='japanese'?'当前日语模型':'NextFire')+' · '+result.alignment_status+' · 覆盖率 '+result.coverage+(result.alignment_status!=='ctc'?' · 最终字符使用回退时间':'');section.append(info);
+      const line=document.createElement('div');line.className='lyrics '+profile;
+      (result[$('view').value]||[]).forEach(unit=>{const node=document.createElement('span');node.className='glyph';node.textContent=unit.text;node.title=fmt(unit.start_ms)+' – '+fmt(unit.end_ms);node.onclick=()=>{selectedLine=i;seekTo(unit.start_ms/1000)};line.append(node);glyphs.push({node,unit})});section.append(line);card.append(section);
+    });
+    const details=document.createElement('details'),summary=document.createElement('summary'),pre=document.createElement('pre');summary.textContent='目标与诊断';pre.textContent=JSON.stringify(Object.fromEntries(['japanese','nextfire'].map(p=>[p,{window:row[p].ctc_window,score:row[p].ctc_score,warnings:row[p].warnings}])),null,2);details.append(summary,pre);card.append(details);$('lines').append(card);cards.push(card);
+  });paint();
+}
+function loadMedia(time=0,resume=false){
+  const generation=++mediaGeneration;audio.pause();pendingSeek={time,resume};
+  if(pendingMetadata)audio.removeEventListener('loadedmetadata',pendingMetadata);
+  pendingMetadata=()=>{if(generation!==mediaGeneration)return;pendingMetadata=null;audio.playbackRate=Number($('speed').value);const request=pendingSeek;if(request)seekTo(request.time,request.resume)};
+  audio.addEventListener('loadedmetadata',pendingMetadata,{once:true});
+  audio.src=song()[$('track').value];audio.load();$('error').textContent='';
+}
+songs.forEach((s,i)=>{const option=document.createElement('option');option.value=i;option.textContent=s.name;$('song').append(option)});
+$('song').onchange=()=>{currentSong=Number($('song').value);selectedLine=0;lastActive=-1;loadMedia();draw()};
+$('track').onchange=()=>loadMedia(pendingSeek?.time ?? audio.currentTime,pendingSeek?.resume ?? !audio.paused);
+$('speed').onchange=()=>{audio.playbackRate=Number($('speed').value)};
+$('view').onchange=draw;
+$('mode').onchange=()=>{if($('mode').value!=='continuous'){const i=song().lines.findIndex(r=>audio.currentTime*1000>=r.start_ms&&audio.currentTime*1000<r.end_ms);if(i>=0)selectedLine=i;else seekTo(song().lines[selectedLine].start_ms/1000,pendingSeek?.resume ?? !audio.paused);}paint()};
+$('previous').onclick=()=>{const i=song().lines.findLastIndex(r=>r.start_ms<audio.currentTime*1000-100);seekLine(i<0?0:i)};
+$('next').onclick=()=>{const i=song().lines.findIndex(r=>r.start_ms>audio.currentTime*1000+100);seekLine(i<0?cards.length-1:i)};
+audio.addEventListener('play',()=>{cancelAnimationFrame(frame);tick()});
+audio.addEventListener('pause',()=>{cancelAnimationFrame(frame);paint()});
+audio.addEventListener('timeupdate',paint);audio.addEventListener('seeked',paint);
+audio.addEventListener('ended',()=>{if($('mode').value==='loop')seekLine(selectedLine)});
+audio.addEventListener('error',()=>{$('error').textContent='音频加载失败，请检查音轨文件和服务器连接。'});
+loadMedia();draw();
+</script></html>
