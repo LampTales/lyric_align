@@ -163,6 +163,9 @@ safety check, any remaining overlap between visible units is split into a
 sequential run during artifact creation; explicit whitespace remains a timing
 boundary. This keeps all timing decisions in the alignment artifact and
 prevents a renderer from having to infer ordering.
+When reliable vocal activity bounds are available, an unanchored trailing run
+is bounded by `singing_end_ms`, so trailing punctuation cannot occupy the
+post-vocal tail of the source lyric interval.
 Pronunciation fields are populated only for Japanese surface characters;
 Latin words and other scripts remain present in `text` but have empty
 `reading`/`romaji`, even when a G2P backend happens to transliterate them.

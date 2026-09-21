@@ -76,7 +76,7 @@ class AlignmentConfig:
     ctc_coverage_threshold: float = 0.8
     # Change this internal cache marker when processing policy changes
     # invalidate cached alignments. It is not the Python package version.
-    pipeline_version: str = "0.13"
+    pipeline_version: str = "0.14"
 
     def __post_init__(self) -> None:
         if self.g2p_backend not in {"openjtalk", "sudachi", "pykakasi"}:

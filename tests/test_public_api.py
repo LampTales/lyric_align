@@ -4,7 +4,7 @@ from pathlib import Path
 from lyric_align import AlignmentConfig, AlignmentArtifact, ModelPaths, load_alignment, prepare_song, validate_song
 from lyric_align.exceptions import InputValidationError
 from lyric_align.g2p import build_surface_spans, convert
-from lyric_align.pipeline import _build_display_units
+from lyric_align.pipeline import _apply_timing_policy, _build_display_units
 from lyric_align.stages import _repair_token_spans
 import unittest
 
@@ -311,6 +311,21 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual(tokens[-1]["end_ms"], 300)
         self.assertTrue(all(tokens[i]["start_ms"] >= tokens[i - 1]["end_ms"] for i in range(1, len(tokens))))
 
+    def test_ctc_repair_keeps_unrelated_positive_boundaries(self):
+        tokens, changed = _repair_token_spans(
+            [
+                {"text": "a", "start_ms": 100, "end_ms": 200},
+                {"text": "b", "start_ms": 200, "end_ms": 200},
+                {"text": "c", "start_ms": 300, "end_ms": 400},
+            ],
+            100,
+            400,
+        )
+        self.assertTrue(changed)
+        self.assertEqual((tokens[0]["start_ms"], tokens[0]["end_ms"]), (100, 200))
+        self.assertEqual((tokens[2]["start_ms"], tokens[2]["end_ms"]), (300, 400))
+        self.assertGreater(tokens[1]["end_ms"], tokens[1]["start_ms"])
+
     def test_ctc_alignment_returns_quality_failure_for_empty_or_short_windows(self):
         import numpy as np
         from lyric_align.stages import _forced_align
@@ -429,6 +444,77 @@ class PublicApiTests(unittest.TestCase):
         assert (units[1]["start_ms"], units[1]["end_ms"]) == (100, 350)
         assert (units[2]["start_ms"], units[2]["end_ms"]) == (350, 400)
         assert "unmapped display unit timing placed between aligned neighbours" in line["warnings"]
+
+    def test_unmapped_terminal_punctuation_respects_reliable_singing_end(self):
+        line = {
+            "text": "醜恐!",
+            "start_ms": 0,
+            "end_ms": 400,
+            "singing_start_ms": 0,
+            "singing_end_ms": 300,
+            "activity_confidence": 0.8,
+            "mora": [
+                {"text": "しゅう", "start_ms": 0, "end_ms": 100},
+                {"text": "お", "start_ms": 100, "end_ms": 200},
+                {"text": "そ", "start_ms": 200, "end_ms": 250},
+                {"text": "れ", "start_ms": 250, "end_ms": 300},
+            ],
+            "surface_spans": [
+                {"surface_start": 0, "surface_end": 1, "reading": "しゅう", "mora_indices": [0]},
+                {"surface_start": 1, "surface_end": 2, "reading": "おそれ", "mora_indices": [1, 2, 3]},
+                {"surface_start": 2, "surface_end": 3, "reading": "!", "mora_indices": []},
+            ],
+            "warnings": [],
+        }
+        units = _build_display_units(line)
+        assert (units[2]["start_ms"], units[2]["end_ms"]) == (300, 300)
+
+    def test_activity_fallback_uses_both_detected_boundaries(self):
+        lines = [_apply_timing_policy([{
+            "text": "かな",
+            "reading": "かな",
+            "start_ms": 100,
+            "end_ms": 1000,
+            "singing_start_ms": 300,
+            "singing_end_ms": 700,
+            "activity_confidence": 0.8,
+            "status": "fallback",
+            "alignment_status": "fallback",
+            "warnings": [],
+        }])[0]]
+        line = lines[0]
+        assert line["timing_source"] == "activity_interpolation"
+        assert line["mora"][0]["start_ms"] == 300
+        assert line["mora"][-1]["end_ms"] == 700
+
+    def test_accepted_ctc_preserves_anchors_despite_activity_bounds(self):
+        line = _apply_timing_policy([{
+            "text": "かな",
+            "reading": "かな",
+            "start_ms": 100,
+            "end_ms": 1000,
+            "singing_start_ms": 300,
+            "singing_end_ms": 700,
+            "activity_confidence": 0.4,
+            "status": "ctc",
+            "alignment_status": "ctc",
+            "ctc_window": {"source": "line_bounds"},
+            "tokens": [
+                {"start_ms": 100, "end_ms": 400},
+                {"start_ms": 400, "end_ms": 1000},
+            ],
+            "mora": [
+                {"start_ms": 100, "end_ms": 400},
+                {"start_ms": 400, "end_ms": 1000},
+            ],
+            "warnings": [],
+        }], activity_confidence_threshold=0.35)[0]
+        assert line["timing_source"] == "ctc"
+        assert line["tokens"][0]["start_ms"] == 100
+        assert line["tokens"][-1]["end_ms"] == 1000
+        first = json.loads(json.dumps(line))
+        _apply_timing_policy([line])
+        assert line == first
 
     def test_unmapped_language_run_uses_gap_before_aligned_character(self):
         line = {

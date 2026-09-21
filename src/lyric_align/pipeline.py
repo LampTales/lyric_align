@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import hashlib
 from dataclasses import replace
@@ -131,7 +132,35 @@ def _timed_mora(reading: str, start: int, end: int) -> list[dict[str, Any]]:
     ]
 
 
-def _build_display_units(line: dict[str, Any]) -> list[dict[str, Any]]:
+def _reliable_activity_bounds(
+    line: dict[str, Any], *, confidence_threshold: float = 0.35,
+) -> tuple[int, int] | None:
+    """Return activity bounds when they are safe for display projection.
+
+    Activity endpoints are deliberately kept as diagnostics on the line.  A
+    display character may use them only when the same confidence gate that
+    drives fallback interpolation has passed and the interval is valid.
+    """
+    start = int(line.get("start_ms", 0))
+    end = int(line.get("end_ms", start))
+    singing_start = line.get("singing_start_ms")
+    singing_end = line.get("singing_end_ms")
+    try:
+        confidence = float(line.get("activity_confidence"))
+    except (TypeError, ValueError):
+        return None
+    if singing_start is None or singing_end is None or not math.isfinite(confidence) or confidence < confidence_threshold:
+        return None
+    bounded_start = max(start, min(end, int(singing_start)))
+    bounded_end = max(start, min(end, int(singing_end)))
+    if bounded_start >= bounded_end:
+        return None
+    return bounded_start, bounded_end
+
+
+def _build_display_units(
+    line: dict[str, Any], *, activity_confidence_threshold: float = 0.35,
+) -> list[dict[str, Any]]:
     """Build the renderer-facing per-character timing contract.
 
     ``tokens`` and ``mora`` describe model internals and may be replaced by a
@@ -144,6 +173,12 @@ def _build_display_units(line: dict[str, Any]) -> list[dict[str, Any]]:
     if not text:
         return []
     start, end = int(line.get("start_ms", 0)), int(line.get("end_ms", 0))
+    activity_bounds = _reliable_activity_bounds(
+        line, confidence_threshold=activity_confidence_threshold,
+    )
+    # Constrain only unanchored projection. Accepted CTC anchors may use the
+    # acoustic search margin outside the activity estimate and stay intact.
+    display_start, display_end = activity_bounds or (start, end)
     spans = line.get("surface_spans") or []
     mora = line.get("mora") or []
     has_mora_source_map = any(
@@ -264,7 +299,7 @@ def _build_display_units(line: dict[str, Any]) -> list[dict[str, Any]]:
     # across the complete sentence.  This keeps the CTC/mora boundaries intact
     # and makes the source of the timing explicit: alignment still owns all
     # lyric times; this is only a display-character projection.
-    unmapped_repaired = _fill_unmapped_display_unit_gaps(units, start, end, include_whitespace=nextfire)
+    unmapped_repaired = _fill_unmapped_display_unit_gaps(units, display_start, display_end, include_whitespace=nextfire)
     overlap_repaired = _split_overlapping_display_units(units)
     # A mapped English fragment can overlap a neighbouring Japanese mora
     # after both local repairs. The renderer contract is strictly monotonic;
@@ -330,6 +365,11 @@ def _fill_unmapped_display_unit_gaps(units: list[dict[str, Any]], start: int, en
             following = units[run_end]
             if not str(following.get("text") or "").strip() or following.get("mora_indices"):
                 right = int(following.get("start_ms", right))
+        # An acoustic anchor takes precedence over the estimated activity
+        # boundary. Collapse the unanchored edge run at that anchor rather
+        # than moving it or creating a reversed interval.
+        if index == 0:
+            left = min(left, right)
         right = max(left, right)
         duration = right - left
         count = run_end - index
@@ -415,16 +455,20 @@ def _split_overlapping_display_units(units: list[dict[str, Any]]) -> bool:
     return changed
 
 
-def _apply_timing_policy(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _apply_timing_policy(
+    lines: list[dict[str, Any]], *, activity_confidence_threshold: float = 0.35,
+) -> list[dict[str, Any]]:
     """Choose a trustworthy character-time source before writing the artifact."""
     for line in lines:
         if not line.get("reading") or line.get("status") == "non_sung":
             line["timing_source"] = "line_interpolation"
             continue
         start, end = int(line.get("start_ms", 0)), int(line.get("end_ms", 0))
-        singing_end = int(line.get("singing_end_ms") or end)
-        activity_ok = line.get("activity_confidence") is not None and float(line.get("activity_confidence") or 0) >= 0.35
-        bounded_end = max(start, min(end, singing_end)) if activity_ok else end
+        activity_bounds = _reliable_activity_bounds(
+            line, confidence_threshold=activity_confidence_threshold,
+        )
+        activity_ok = activity_bounds is not None
+        bounded_start, bounded_end = activity_bounds if activity_bounds else (start, end)
         warnings = [str(value) for value in (line.get("warnings") or [])]
         repaired = any("zero-duration" in value for value in warnings)
         status = line.get("alignment_status") or line.get("status")
@@ -432,22 +476,13 @@ def _apply_timing_policy(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # collapsed symbols; discarding the complete line here was the main
         # reason the observed CTC acceptance rate was unexpectedly low.
         if status == "ctc":
-            bounded_by_ctc = str((line.get("ctc_window") or {}).get("source") or "") == "activity_bounds"
-            source = "ctc" if bounded_by_ctc or bounded_end >= end else "ctc_rescaled"
-            if bounded_end < end and not bounded_by_ctc:
-                factor = (bounded_end - start) / max(1, end - start)
-                for item in line.get("tokens") or []:
-                    a, b = int(item.get("start_ms", start)), int(item.get("end_ms", end))
-                    item["start_ms"] = start + round((a - start) * factor)
-                    item["end_ms"] = start + round((b - start) * factor)
-                for item in line.get("mora") or []:
-                    a, b = int(item.get("start_ms", start)), int(item.get("end_ms", end))
-                    item["start_ms"] = start + round((a - start) * factor)
-                    item["end_ms"] = start + round((b - start) * factor)
-            line["timing_source"] = source
+            # Accepted CTC times already refer to the audio. Rescaling them
+            # from the sentence interval to activity bounds moves valid
+            # internal anchors (and applies repeatedly on partial reruns).
+            line["timing_source"] = "ctc"
             continue
         if activity_ok:
-            line["mora"] = _timed_mora(str(line.get("reading") or ""), start, bounded_end)
+            line["mora"] = _timed_mora(str(line.get("reading") or ""), bounded_start, bounded_end)
             line["timing_source"] = "activity_interpolation"
             if repaired and "CTC timing replaced by activity-bounded interpolation" not in warnings:
                 warnings.append("CTC timing replaced by activity-bounded interpolation")
@@ -723,6 +758,8 @@ def prepare_song(
         # Offset-only enhancement also honors the temporary-vocal policy.
         (song_dir / stem_paths["vocals"]).unlink(missing_ok=True)
         stem_paths["vocals"] = None
+    # Retain the historical 0.35 gate for approximate fallback/projection;
+    # acoustic search uses config.activity_confidence_threshold (default 0.45).
     line_values = _apply_timing_policy(line_values)
     for line in line_values:
         line["display_units"] = _build_display_units(line)

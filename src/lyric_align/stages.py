@@ -66,36 +66,93 @@ def _repair_token_spans(tokens: list[dict[str, Any]], start_ms: int, end_ms: int
     if not tokens:
         return tokens, False
     repaired = [dict(item) for item in tokens]
-    n = len(repaired)
-    raw = []
     for item in repaired:
-        a = max(int(start_ms), min(int(end_ms), int(item.get("start_ms", start_ms))))
-        b = max(a, min(int(end_ms), int(item.get("end_ms", a))))
-        raw.append((a, b))
-    # Fast path: preserve the model's boundaries when they are already
-    # strictly usable.  This is the common case and avoids needless drift.
-    if all(b > a for a, b in raw) and all(raw[i][0] >= raw[i - 1][1] for i in range(1, n)):
-        return repaired, False
+        a = max(start_ms, min(end_ms, int(item["start_ms"])))
+        b = max(a, min(end_ms, int(item["end_ms"])))
+        item["start_ms"], item["end_ms"] = a, b
 
-    # When several symbols collapse to one CTC frame, use the observed
-    # positive durations as weights and give collapsed symbols the median
-    # positive duration.  Normalize the resulting partition to the sentence
-    # interval so every token remains visible and the sequence is monotonic.
-    positive = [b - a for a, b in raw if b > a]
-    fallback = max(1, sorted(positive)[len(positive) // 2] if positive else (int(end_ms) - int(start_ms)) // max(1, n))
-    weights = [max(1, b - a) if b > a else fallback for a, b in raw]
-    available = max(0, int(end_ms) - int(start_ms))
-    total = sum(weights)
-    cursor = int(start_ms)
-    for index, (item, weight) in enumerate(zip(repaired, weights)):
-        if index == n - 1:
-            boundary = int(end_ms)
+    # A valid CTC path is ordered and non-overlapping. Preserve all positive
+    # anchors. Clipping at a crop edge can collapse a prefix or suffix; try
+    # filling only the gap owned by that collapsed run. If there is no room,
+    # borrow the minimum (one millisecond per token) from an adjacent span.
+    # An impossible repair remains zero-duration for the quality gate.
+    index = 0
+    while index < len(repaired):
+        item = repaired[index]
+        previous_end = repaired[index - 1]["end_ms"] if index else start_ms
+        item["start_ms"] = max(previous_end, item["start_ms"])
+        item["end_ms"] = max(item["start_ms"], item["end_ms"])
+        if item["end_ms"] > item["start_ms"]:
+            index += 1
+            continue
+        stop = index + 1
+        # Extend the local collision run until there is enough room for every
+        # collapsed label. This avoids leaving a cluster of zero-duration
+        # labels when several CTC symbols share one frame.
+        while stop < len(repaired):
+            if repaired[stop]["start_ms"] <= previous_end:
+                stop += 1
+                continue
+            candidate_right = repaired[stop]["end_ms"] if repaired[stop]["end_ms"] > repaired[stop]["start_ms"] else repaired[stop]["start_ms"]
+            if candidate_right - previous_end >= stop - index:
+                break
+            stop += 1
+        left = previous_end
+        group_positive_ends = [
+            repaired[i]["end_ms"] for i in range(index, stop)
+            if repaired[i]["end_ms"] > repaired[i]["start_ms"]
+        ]
+        right = (
+            max(group_positive_ends)
+            if group_positive_ends
+            else (repaired[stop]["start_ms"] if stop < len(repaired) else end_ms)
+        )
+        right = max(left, right)
+        count = stop - index
+        if right - left < count:
+            needed = count - (right - left)
+            if stop < len(repaired):
+                following = repaired[stop]
+                borrow = min(needed, max(0, following["end_ms"] - right - 1))
+                right += borrow
+                following["start_ms"] = right
+                needed -= borrow
+            if needed and index:
+                preceding = repaired[index - 1]
+                borrow = min(needed, max(0, left - preceding["start_ms"] - 1))
+                left -= borrow
+                preceding["end_ms"] = left
+        local_positive = [
+            i for i in range(index, stop)
+            if repaired[i]["end_ms"] > repaired[i]["start_ms"]
+        ]
+        if local_positive:
+            # Give collapsed labels the smallest visible interval first, then
+            # preserve the positive labels' total local boundary as closely
+            # as possible. This keeps a valid following span from being
+            # stretched merely because its predecessor collapsed.
+            zero_count = count - len(local_positive)
+            available = max(0, right - left)
+            remaining = max(0, available - zero_count)
+            positive_total = sum(
+                repaired[i]["end_ms"] - repaired[i]["start_ms"] for i in local_positive
+            )
+            cursor = left
+            for i in range(index, stop):
+                item = repaired[i]
+                if item["end_ms"] <= item["start_ms"]:
+                    boundary = min(right, cursor + 1)
+                else:
+                    weight = item["end_ms"] - item["start_ms"]
+                    boundary = cursor + round(remaining * weight / max(1, positive_total))
+                item["start_ms"], item["end_ms"] = cursor, max(cursor, boundary)
+                cursor = item["end_ms"]
         else:
-            boundary = cursor + round(available * weight / max(1, total))
-            boundary = min(int(end_ms) - (n - index - 1), max(cursor + 1, boundary))
-        item["start_ms"], item["end_ms"] = cursor, max(cursor, boundary)
-        cursor = item["end_ms"]
-    return repaired, True
+            for offset in range(count):
+                repaired[index + offset]["start_ms"] = left + round((right - left) * offset / count)
+                repaired[index + offset]["end_ms"] = left + round((right - left) * (offset + 1) / count)
+        index = stop
+    return repaired, repaired != tokens
 
 
 def _save_stem(tensor: Any, path: Path, sample_rate: int, config: AlignmentConfig, bitrate: str) -> None:
