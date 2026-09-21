@@ -27,17 +27,16 @@ def test_rollup_keeps_worker_errors_and_offset(tmp_path):
     config = AlignmentConfig()
     line = AlignmentLine(0, '歌', reading='うた', status='ctc', alignment_status='ctc')
     metrics = line_metrics(line, config, {'status': 'done'})
-    save(tmp_path / 'results/001.json', dict(id='001', song='song', profile='japanese', state='ok',
+    save(tmp_path / 'results/001.json', dict(id='001', song='song', state='ok',
         seconds=2, lines=[metrics], timing={'global_offset_ms': 120, 'offset_status': 'accepted'}))
-    save(tmp_path / 'results/002.json', dict(id='002', song='song', profile='nextfire', state='timeout',
+    save(tmp_path / 'results/002.json', dict(id='002', song='song', state='timeout',
         seconds=1800, lines=[], error='timeout'))
     manifest = {'jobs': [1, 2], 'limitations': 'not accuracy'}
     results = rollup(tmp_path, manifest)
     import json
     summary = json.loads((tmp_path / 'summary.json').read_text())
     assert len(results) == 2
-    assert summary['profiles']['japanese']['nonzero_offset_songs'] == 1
-    assert summary['profiles']['nextfire']['job_states'] == {'timeout': 1}
+    assert summary['model']['nonzero_offset_songs'] == 1
+    assert summary['model']['job_states'] == {'ok': 1, 'timeout': 1}
     assert summary['errors'][0]['state'] == 'timeout'
-    assert summary['paired_eligible_line_outcomes'] == {}
     assert (tmp_path / 'songs.csv').exists() and (tmp_path / 'lines.csv').exists()

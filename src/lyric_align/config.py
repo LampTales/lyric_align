@@ -67,8 +67,6 @@ class AlignmentConfig:
     offset_acoustic_verify: bool = False
     offset_acoustic_min_margin: float = 0.15
     ctc_margin_ms: int = 500
-    # Explicit text representation; model paths alone never select a policy.
-    ctc_profile: str = "japanese"
     # Activity endpoints are used to narrow CTC only when the detector is
     # sufficiently confident.  A small margin protects consonants at the
     # boundary without feeding a whole silent/interlude window to CTC.
@@ -78,13 +76,9 @@ class AlignmentConfig:
     ctc_coverage_threshold: float = 0.8
     # Change this internal cache marker when processing policy changes
     # invalidate cached alignments. It is not the Python package version.
-    pipeline_version: str = "0.12"
+    pipeline_version: str = "0.13"
 
     def __post_init__(self) -> None:
-        if self.ctc_profile not in {"japanese", "nextfire"}:
-            raise ValueError("ctc_profile must be japanese or nextfire")
-        if self.ctc_profile == "nextfire" and self.sample_rate != 16000:
-            raise ValueError("NextFire requires sample_rate=16000")
         if self.g2p_backend not in {"openjtalk", "sudachi", "pykakasi"}:
             raise ValueError("g2p_backend must be openjtalk, sudachi, or pykakasi")
         if self.sample_rate <= 0:
@@ -141,7 +135,6 @@ class AlignmentConfig:
             "offset_acoustic_verify": self.offset_acoustic_verify,
             "offset_acoustic_min_margin": self.offset_acoustic_min_margin,
             "ctc_margin_ms": self.ctc_margin_ms,
-            "ctc_profile": self.ctc_profile,
             "ctc_activity_margin_ms": self.ctc_activity_margin_ms,
             "activity_confidence_threshold": self.activity_confidence_threshold,
             "ctc_score_threshold": self.ctc_score_threshold,

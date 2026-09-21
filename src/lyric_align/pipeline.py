@@ -43,7 +43,6 @@ def _stage_signature(config: AlignmentConfig, stage: str) -> str:
             "offset_ctc_model_path": str(config.models.ctc_model_path) if config.offset_acoustic_verify else None,
             "offset_ctc_coverage": config.ctc_coverage_threshold if config.offset_acoustic_verify else None,
             "offset_device": config.device if config.offset_acoustic_verify else None,
-            "offset_ctc_profile": config.ctc_profile if config.offset_acoustic_verify else None,
         }
     elif stage == "demucs":
         values = {"demucs_model_name": config.demucs_model_name, "demucs_model_path": str(config.models.demucs_model_path) if config.models.demucs_model_path else None, "device": config.device, "keep_vocals": config.keep_vocals, "keep_instrumental": config.keep_instrumental, "vocals_format": config.vocals_format, "instrumental_format": config.instrumental_format, "vocals_bitrate": config.vocals_bitrate, "instrumental_bitrate": config.instrumental_bitrate}
@@ -51,8 +50,6 @@ def _stage_signature(config: AlignmentConfig, stage: str) -> str:
         values = {"ctc_model_path": str(config.models.ctc_model_path) if config.models.ctc_model_path else None, "device": config.device, "sample_rate": config.sample_rate, "ctc_margin_ms": config.ctc_margin_ms, "ctc_activity_margin_ms": config.ctc_activity_margin_ms, "activity_confidence_threshold": config.activity_confidence_threshold, "ctc_score_threshold": config.ctc_score_threshold, "ctc_coverage_threshold": config.ctc_coverage_threshold, "pipeline_version": config.pipeline_version}
     else:
         values = config.as_dict()
-    if stage == "ctc":
-        values["ctc_profile"] = config.ctc_profile
     payload = json.dumps(values, ensure_ascii=False, sort_keys=True).encode()
     return hashlib.sha256(payload).hexdigest()
 

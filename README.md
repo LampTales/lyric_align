@@ -65,7 +65,7 @@ artifact = prepare_song(
         g2p_backend="sudachi",
         models=ModelPaths(
             demucs_model_path="/models/demucs/htdemucs",
-            ctc_model_path="/models/wav2vec2-japanese",
+            ctc_model_path="/models/mms-300m-ForcedAligner-karaoke-ja-Latn",
         ),
     ),
 )
@@ -96,17 +96,15 @@ lyric-align prepare \
   --song-dir /data/song \
   --stages reading demucs ctc \
   --demucs-model-path /models/demucs/htdemucs \
-  --ctc-model-path /models/wav2vec2-japanese
+  --ctc-model-path /models/mms-300m-ForcedAligner-karaoke-ja-Latn
 ```
 
-To use the downloaded NextFire karaoke checkpoint, select its explicit Latin
-target profile (the model path alone does not change lyric conversion):
+The CTC stage uses the downloaded NextFire karaoke checkpoint and its Latin target conversion:
 
 ```bash
 lyric-align prepare --song-dir /data/song --stages reading demucs ctc \
   --demucs-model-path /models/demucs/htdemucs \
-  --ctc-model-path /ref/mms-300m-ForcedAligner-karaoke-ja-Latn \
-  --ctc-profile nextfire
+  --ctc-model-path /ref/mms-300m-ForcedAligner-karaoke-ja-Latn
 ```
 
 This retains the displayed lyric text and Japanese reading metadata, while

@@ -14,9 +14,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import AlignmentConfig
-from .ctc_text import build_target, group_nextfire_tokens
+from .ctc_text import build_target, group_ctc_tokens
 from .exceptions import StageUnavailableError
-from .g2p import SMALL, split_mora
+from .g2p import split_mora
 ProgressCallback = Callable[[float, str], None]
 
 
@@ -51,37 +51,6 @@ def _load_ctc_bundle(model_path: str, device: str) -> tuple[Any, Any, Any]:
         # If another caller loaded the same model while this one was reading,
         # keep the first object and release the duplicate reference.
         return _CTC_MODEL_CACHE.setdefault(key, bundle)
-
-
-def _group_ctc_mora(tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    groups: list[list[dict[str, Any]]] = []
-    for token in tokens:
-        if token.get("text") in SMALL and groups:
-            groups[-1].append(token)
-        else:
-            groups.append([token])
-    result = []
-    for group in groups:
-        source_indices = sorted({
-            int(item["source_mora_index"])
-            for item in group
-            if item.get("source_mora_index") is not None
-        })
-        value = {
-            "text": "".join(str(item.get("text") or "") for item in group),
-            "start_ms": min(int(item["start_ms"]) for item in group),
-            "end_ms": max(int(item["end_ms"]) for item in group),
-            "frame_confidence": round(sum(float(item.get("frame_confidence", -99)) for item in group) / len(group), 3),
-            "chars": group,
-            "method": "ctc",
-        }
-        # surface_spans point into the original G2P mora sequence.  CTC may
-        # omit symbols which are absent from its vocabulary, so retain the
-        # original mora identity on each compressed group for renderers.
-        if source_indices:
-            value["source_mora_indices"] = source_indices
-        result.append(value)
-    return result
 
 
 def _repair_token_spans(tokens: list[dict[str, Any]], start_ms: int, end_ms: int) -> tuple[list[dict[str, Any]], bool]:
@@ -347,8 +316,8 @@ def align_ctc(
     audio = _decode_audio(Path(vocal_path), config.ffmpeg_path, config.sample_rate)
     vocab = processor.tokenizer.get_vocab()
     blank = int(processor.tokenizer.pad_token_id or 0)
-    if config.ctc_profile == "nextfire" and (not all(c in vocab for c in "abcdefghijklmnopqrstuvwxyz") or blank in [vocab[c] for c in "abcdefghijklmnopqrstuvwxyz"]):
-        raise StageUnavailableError("nextfire profile requires a Latin-letter CTC vocabulary and separate blank")
+    if not all(c in vocab for c in "abcdefghijklmnopqrstuvwxyz") or blank in [vocab[c] for c in "abcdefghijklmnopqrstuvwxyz"]:
+        raise StageUnavailableError("The NextFire model requires a Latin-letter vocabulary and separate blank")
     expected_rate = getattr(processor.feature_extractor, "sampling_rate", config.sample_rate)
     if config.sample_rate != expected_rate:
         raise StageUnavailableError(f"CTC model requires sample_rate={expected_rate}")
@@ -380,13 +349,13 @@ def align_ctc(
             left = max(0, int((window_start - search_margin) * config.sample_rate / 1000))
             right = min(len(audio), int((window_end + search_margin) * config.sample_rate / 1000))
             segment = audio[left:right]
-            char_records, coverage, target_text = build_target(line, config.ctc_profile, vocab)
+            char_records, coverage, target_text = build_target(line, vocab)
             chars = [record["text"] for record in char_records]
             target = [int(vocab[char]) for char in chars]
             if len(segment) < 400 or not target:
                 updated = dict(line, alignment_status="fallback", coverage=coverage, tokens=[], ctc_score=-1e9)
                 updated["ctc_window"] = {"start_ms": window_start, "end_ms": window_end, "source": window_source,
-                                         "profile": config.ctc_profile, "target": target_text}
+                                         "profile": "nextfire", "target": target_text}
                 updated["warnings"] = list(line.get("warnings") or []) + ["CTC empty target or audio shorter than model receptive field"]
                 output.append(updated)
                 completed += 1
@@ -409,11 +378,11 @@ def align_ctc(
             updated = dict(line, warnings=list(line.get("warnings") or []))
             updated["ctc_score"] = round(score, 4)
             updated["tokens"] = tokens
-            updated["ctc_window"] = {"start_ms": window_start, "end_ms": window_end, "source": window_source, "profile": config.ctc_profile, "target": target_text}
+            updated["ctc_window"] = {"start_ms": window_start, "end_ms": window_end, "source": window_source, "profile": "nextfire", "target": target_text}
             positive_ratio = sum(int(item["end_ms"] > item["start_ms"]) for item in tokens) / max(1, len(tokens))
             updated["alignment_status"] = "ctc" if coverage >= config.ctc_coverage_threshold and score >= config.ctc_score_threshold and positive_ratio >= 1.0 else "fallback"
             if updated["alignment_status"] == "ctc":
-                updated["mora"] = group_nextfire_tokens(tokens) if config.ctc_profile == "nextfire" else _group_ctc_mora(tokens)
+                updated["mora"] = group_ctc_tokens(tokens)
                 updated["coverage"] = round(coverage, 3)
                 updated["method"] = "demucs+ctc"
                 if repaired:
@@ -454,7 +423,7 @@ def score_offset_candidates(
             for line in lines:
                 left = round((int(line["start_ms"]) + offset) * config.sample_rate / 1000)
                 right = round((int(line["end_ms"]) + offset) * config.sample_rate / 1000)
-                records, coverage, _ = build_target(line, config.ctc_profile, vocab)
+                records, coverage, _ = build_target(line, vocab)
                 target = [int(vocab[record["text"]]) for record in records]
                 if left < 0 or right > len(audio) or right - left < 400 or not target or coverage < config.ctc_coverage_threshold:
                     scores.append(None)

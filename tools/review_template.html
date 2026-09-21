@@ -4,8 +4,8 @@
 <style>
 :root{color-scheme:dark}body{font:16px system-ui,sans-serif;background:#111820;color:#e0e6ed;max-width:1080px;margin:0 auto;padding:20px}h1{font-size:26px}p{line-height:1.6}.player{position:sticky;top:0;background:#17212cf5;padding:16px;z-index:2;border:1px solid #3b4a58;border-radius:10px}audio{width:100%;margin:10px 0}.controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap}button,select{font:inherit;padding:8px;background:#253545;color:inherit;border:1px solid #54677a;border-radius:6px}button{cursor:pointer}article{border:1px solid #364452;padding:18px;margin:18px 0;border-radius:10px;scroll-margin-top:250px}article.current{border-color:#73cfb6}article.past{opacity:.8}.lyrics{font-size:25px;line-height:1.9;white-space:pre-wrap;overflow-wrap:anywhere}.glyph{cursor:pointer}.glyph.done{color:#6bdbc0}.glyph.active{background:#a56224;color:white}.meta{color:#a5b6c7;font-size:14px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}.row{margin:14px 0}#error{color:#ffab95}#clock{font-variant-numeric:tabular-nums}@media(max-width:600px){body{padding:8px}.lyrics{font-size:21px}.player{padding:10px}article{scroll-margin-top:300px}}
 </style>
-<h1>NextFire / 当前日语模型</h1>
-<p>同一人声、同一歌词窗口，关闭全曲 offset。这里展示整首歌的全部歌词句子；默认整曲连续播放，音频会在句间继续播放。通过率是自动质量门结果，不是人工边界准确率，两模型分数尚未校准。</p>
+<h1>NextFire 歌词对齐</h1>
+<p>这里展示 NextFire 模型生成的整首歌词时间轴。通过率是自动质量门结果，不是人工边界准确率。</p>
 <section class="player">
 <div class="controls"><label>歌曲 <select id="song"></select></label><label>音轨 <select id="track"><option value="audio">原曲</option><option value="vocals">分离人声</option></select></label><label>速度 <select id="speed"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option></select></label></div>
 <audio id="audio" controls preload="metadata"></audio>
@@ -59,12 +59,11 @@ function draw(){
     const h=document.createElement('h3');h.textContent=`${i+1}. ${row.text}`;card.append(h);
     const button=document.createElement('button');button.textContent='从此句播放';button.onclick=()=>seekLine(i);card.append(button);
     const label=document.createElement('span');label.className='meta';label.textContent=' '+fmt(row.start_ms)+' – '+fmt(row.end_ms);card.append(label);
-    ['japanese','nextfire'].forEach(profile=>{const result=row[profile],section=document.createElement('div');section.className='row';
-      const info=document.createElement('p');info.className='meta';info.textContent=(profile==='japanese'?'当前日语模型':'NextFire')+' · '+result.alignment_status+' · 覆盖率 '+result.coverage+(result.alignment_status!=='ctc'?' · 最终字符使用回退时间':'');section.append(info);
-      const line=document.createElement('div');line.className='lyrics '+profile;
-      (result[$('view').value]||[]).forEach(unit=>{const node=document.createElement('span');node.className='glyph';node.textContent=unit.text;node.title=fmt(unit.start_ms)+' – '+fmt(unit.end_ms);node.onclick=()=>{selectedLine=i;seekTo(unit.start_ms/1000)};line.append(node);glyphs.push({node,unit})});section.append(line);card.append(section);
-    });
-    const details=document.createElement('details'),summary=document.createElement('summary'),pre=document.createElement('pre');summary.textContent='目标与诊断';pre.textContent=JSON.stringify(Object.fromEntries(['japanese','nextfire'].map(p=>[p,{window:row[p].ctc_window,score:row[p].ctc_score,warnings:row[p].warnings}])),null,2);details.append(summary,pre);card.append(details);$('lines').append(card);cards.push(card);
+    const result=row.result,section=document.createElement('div');section.className='row';
+    const info=document.createElement('p');info.className='meta';info.textContent='NextFire · '+(result.alignment_status || result.status)+' · 覆盖率 '+result.coverage+(result.alignment_status!=='ctc'?' · 最终字符使用回退时间':'');section.append(info);
+    const line=document.createElement('div');line.className='lyrics nextfire';
+    (result[$('view').value]||[]).forEach(unit=>{const node=document.createElement('span');node.className='glyph';node.textContent=unit.text;node.title=fmt(unit.start_ms)+' – '+fmt(unit.end_ms);node.onclick=()=>{selectedLine=i;seekTo(unit.start_ms/1000)};line.append(node);glyphs.push({node,unit})});section.append(line);card.append(section);
+    const details=document.createElement('details'),summary=document.createElement('summary'),pre=document.createElement('pre');summary.textContent='目标与诊断';pre.textContent=JSON.stringify({window:result.ctc_window,score:result.ctc_score,warnings:result.warnings},null,2);details.append(summary,pre);card.append(details);$('lines').append(card);cards.push(card);
   });paint();
 }
 function loadMedia(time=0,resume=false){

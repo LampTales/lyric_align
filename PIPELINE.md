@@ -137,9 +137,9 @@ export HF_HOME="$PWD/models/huggingface"
 
 ### 5.3 CTC 强制对齐
 
-CTC 模型输入人声波形，输出每个声学帧对词表标签的概率。歌词 reading 已知时，`ctc_align.py` 在句级窗口（当前为前后各 500 ms）内用 Viterbi 搜索一条必须经过完整 reading 的路径。它不是重新识别歌词，而是在已知歌词下估计每个字符的时间。
+CTC 模型输入人声波形，输出每个声学帧对词表标签的概率。歌词 reading 已知时，库的 CTC stage 在句级窗口（当前为前后各 500 ms）内用 Viterbi 搜索一条必须经过完整拉丁 target 的路径。它不是重新识别歌词，而是在已知歌词下估计每个字符的时间。
 
-当前模型：`jonatasgrosman/wav2vec2-large-xlsr-53-japanese`。模型目录必须在 `models/huggingface/`，推理使用 `local_files_only=True`，避免运行时偷偷联网。
+当前模型：`NextFire/mms-300m-ForcedAligner-karaoke-ja-Latn`。模型目录必须在 `models/huggingface/`，推理使用 `local_files_only=True`，避免运行时偷偷联网。
 
 ## 6. 统一产物格式
 
@@ -277,32 +277,17 @@ backend image
 PYTHONPATH=src python -m lyric_align.cli prepare \
   --song-dir samples/<song> --stages reading demucs ctc \
   --demucs-model-path /models/demucs/<snapshot> \
-  --ctc-model-path /models/wav2vec2-japanese
+  --ctc-model-path /models/mms-300m-ForcedAligner-karaoke-ja-Latn
 ```
 
 阶段结果会写入 `alignment.json` 和 `preprocessing.json`。Demucs 的压缩 stem 可独立复用；CTC 失败时下次从句级窗口重新计算，不保存帧级 checkpoint。
 
-旧版实验脚本仍可用于复现实验报告，但不属于公开库 API：
+旧版实验脚本不再参与公开流程；所有结果目录都可删除后重建，样本、模型和中间音频由 `.gitignore` 排除。
 
-```bash
-conda activate lyric
-python prepare_reading.py --backend sudachi --out results/reading_sudachi
-python activity_baseline.py
-export HF_HOME="$PWD/models/huggingface"
-python ctc_align.py --song <song_dir> --vocals <vocals.wav> \
-  --reading <reading.json> --out results/ctc_<name>.json
-python ctc_mora.py --input results/ctc_<name>.json \
-  --out results/ctc_<name>_mora.json
-```
+### NextFire Latin target
 
-所有结果目录都可删除后重建；样本、模型和中间音频由 `.gitignore` 排除，不应写入生产 Git 提交。
-
-### NextFire Latin target profile
-
-When `AlignmentConfig.ctc_profile="nextfire"`, CTC targets are generated
-separately from the display reading. Japanese morae are converted to Latin
-letters, while Latin words use their surface spelling; punctuation and spaces
-are omitted. Each target letter retains source reading and surface indices, so
-the resulting mora/display units can still highlight the original lyric. The
-default `japanese` profile and its kana targets are unchanged. The selected
-profile is part of the CTC cache signature and is recorded in `ctc_window`.
+The CTC stage always uses the NextFire karaoke checkpoint. Japanese morae are
+converted to Latin letters, while Latin words use their surface spelling;
+punctuation and spaces are omitted. Each target letter retains source reading
+and surface indices, so the resulting mora/display units can still highlight
+the original lyric. The selected model is recorded in `ctc_window`.

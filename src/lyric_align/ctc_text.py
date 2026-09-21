@@ -1,7 +1,7 @@
 """Model-specific targets, retaining the source reading/display identities.
 
-NextFire consumes letters, not kana or IPA. English uses surface spelling in
-this first baseline, rather than an unverified English-to-Japanese G2P rule.
+The karaoke checkpoint consumes Latin letters, not kana or IPA. English uses
+surface spelling rather than an unverified English-to-Japanese G2P rule.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def _kana(value: str) -> str:
     return _EXTENDED.get(value, romaji(value).replace(" ", ""))
 
 
-def build_target(line: dict[str, Any], profile: str, vocab: dict[str, int]) -> tuple[list[dict[str, Any]], float, str]:
+def build_target(line: dict[str, Any], vocab: dict[str, int]) -> tuple[list[dict[str, Any]], float, str]:
     """Return character records, vocabulary coverage, and the full target.
 
     Unsupported letters/readings count against coverage. Punctuation is not
@@ -50,14 +50,6 @@ def build_target(line: dict[str, Any], profile: str, vocab: dict[str, int]) -> t
         if start >= 0:
             ranges.append((start, start + len(mora), index, mora))
             cursor = start + len(mora)
-
-    if profile == "japanese":
-        records = []
-        for pos, char in enumerate(reading):
-            if char in vocab:
-                source = next((i for a, b, i, _ in ranges if a <= pos < b), None)
-                records.append(dict(text=char, source_reading_index=pos, source_mora_index=source))
-        return records, len(records) / max(1, len(reading)), reading
 
     spans = sorted(line.get("surface_spans") or [], key=lambda item: int(item.get("reading_start", 0)))
     overrides = {}
@@ -131,7 +123,7 @@ def build_target(line: dict[str, Any], profile: str, vocab: dict[str, int]) -> t
     return records, len(records) / max(1, len(full)), "".join(full)
 
 
-def group_nextfire_tokens(tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def group_ctc_tokens(tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups: list[list[dict[str, Any]]] = []
     for token in tokens:
         if groups and groups[-1][0]["source_unit"] == token["source_unit"]:

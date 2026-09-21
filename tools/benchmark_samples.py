@@ -1,4 +1,4 @@
-"""Isolated full-sample A/B benchmark. Prepare once, then run in tmux.
+"""Isolated full-sample NextFire benchmark. Prepare once, then run in tmux.
 
 No pronunciation or alignment policy is changed by this harness. Each job
 uses a fresh process and the frozen source tree in the experiment directory.
@@ -54,13 +54,11 @@ def prepare(args):
         (snap / filename).write_text(subprocess.check_output(command, cwd=repo, text=True))
     (out / 'logs').mkdir()
     (out / 'results').mkdir()
-    models = {'japanese': args.japanese_model.resolve(), 'nextfire': args.nextfire_model.resolve()}
-    model_files = {}
-    for profile, model in models.items():
-        if not model.is_dir():
-            raise ValueError(f'Missing model: {model}')
-        model_files[profile] = {p.name: {'bytes': p.stat().st_size, 'sha256': digest(p)}
-                                for p in model.iterdir() if p.is_file()}
+    model = args.ctc_model.resolve()
+    if not model.is_dir():
+        raise ValueError(f'Missing model: {model}')
+    model_files = {p.name: {'bytes': p.stat().st_size, 'sha256': digest(p)}
+                   for p in model.iterdir() if p.is_file()}
     sources = [p for p in sorted(args.samples.resolve().iterdir()) if p.is_dir() and not p.name.startswith('.')]
     if args.song_ids:
         wanted = set(args.song_ids)
@@ -84,30 +82,28 @@ def prepare(args):
             info.update(rows=len(rows), nonempty_rows=sum(bool(str(r.get('text') or '').strip()) for r in rows),
                         audio_sha256=digest(audio), vocals_sha256=digest(vocals),
                         timeline_sha256=digest(source / 'lyrics_timeline.json'), vocals=str(vocals))
-            for profile, model in models.items():
-                dest = out / profile / source.name
-                dest.mkdir(parents=True)
-                for name in ('metadata.json', 'lyrics_timeline.json'):
-                    shutil.copy2(source / name, dest / name)
-                (dest / audio.name).symlink_to(audio)
-                (dest / 'stems').mkdir()
-                (dest / 'stems' / vocals.name).symlink_to(vocals)
+            dest = out / source.name
+            dest.mkdir(parents=True)
+            for name in ('metadata.json', 'lyrics_timeline.json'):
+                shutil.copy2(source / name, dest / name)
+            (dest / audio.name).symlink_to(audio)
+            (dest / 'stems').mkdir()
+            (dest / 'stems' / vocals.name).symlink_to(vocals)
         except Exception:
             info['preflight_error'] = traceback.format_exc()
         songs.append(info)
-        for profile, model in models.items():
-            config = AlignmentConfig(models=ModelPaths(ctc_model_path=model), ctc_profile=profile,
-                                     enable_offset=True, keep_vocals=True, ctc_score_threshold=args.ctc_score_threshold,
-                                     vocals_format=Path(info.get('vocals', 'vocals.mp3')).suffix.lstrip('.'))
-            jobs.append({'id': f'{len(jobs)+1:03d}', 'song': source.name, 'profile': profile,
-                         'config': config.as_dict(), 'model': str(model),
-                         'vocals_format': config.vocals_format, 'preflight_error': info['preflight_error']})
+        config = AlignmentConfig(models=ModelPaths(ctc_model_path=model),
+                                 enable_offset=True, keep_vocals=True, ctc_score_threshold=args.ctc_score_threshold,
+                                 vocals_format=Path(info.get('vocals', 'vocals.mp3')).suffix.lstrip('.'))
+        jobs.append({'id': f'{len(jobs)+1:03d}', 'song': source.name,
+                     'config': config.as_dict(), 'model': str(model),
+                     'vocals_format': config.vocals_format, 'preflight_error': info['preflight_error']})
     manifest = {'created_at': now(), 'python': sys.executable, 'git_head': subprocess.check_output(
         ['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip(), 'songs': songs, 'jobs': jobs,
         'models': model_files, 'timeout_seconds': args.timeout,
         'packages': {p: importlib.metadata.version(p) for p in ('torch', 'transformers', 'numpy', 'sudachipy', 'sudachidict-core')},
         'snapshot_hashes': {str(p.relative_to(snap)): digest(p) for p in snap.rglob('*.py')},
-        'policy': 'Both current profiles, CPU, full timelines, shared retained vocals, default offset estimation and boundary checks enabled (acoustic verification remains default off), no Demucs rerun; fresh process/model per job. Source audio symlinks are hash-checked before each job.',
+        'policy': 'NextFire model only, CPU, full timelines, default offset estimation and boundary checks enabled (acoustic verification remains default off), no Demucs rerun; fresh process/model per job. Source audio symlinks are hash-checked before each job.',
         'limitations': 'Coverage and scores are NOT boundary accuracy; scores are not calibrated across models. Fallback reasons reconstructed from rounded artifact metrics; all original warnings retained. Script categories are character heuristics, not language identification.'}
     save(out / 'manifest.json', manifest)
     save(out / 'status.json', {'state': 'prepared', 'total_jobs': len(jobs), 'completed_jobs': 0})
@@ -116,7 +112,7 @@ def prepare(args):
         'experiment.log: complete console log; logs/: per-job output\n'
         'results/: per-job status, exceptions, line metrics, fallback reasons\n'
         'summary.json, songs.csv, lines.csv: cumulative machine-readable statistics\n'
-        'japanese/ and nextfire/: full alignment.json and preprocessing.json\n'
+        'one directory per song: full alignment.json and preprocessing.json\n'
         'manifest.json, snapshot/: frozen inputs/config/code provenance\n'
         'No manual accuracy claim. Analysis is deferred until requested.\n')
     print(json.dumps({'output': str(out), 'songs': len(songs), 'jobs': len(jobs),
@@ -171,18 +167,18 @@ def worker(out, job_id):
     manifest = json.loads((out / 'manifest.json').read_text())
     job = next(j for j in manifest['jobs'] if j['id'] == job_id)
     started = time.monotonic()
-    result = {'id': job_id, 'song': job['song'], 'profile': job['profile'], 'started_at': now(), 'lines': []}
+    result = {'id': job_id, 'song': job['song'], 'started_at': now(), 'lines': []}
     try:
         if job['preflight_error']:
             raise ValueError(job['preflight_error'])
         source = next(s for s in manifest['songs'] if s['song'] == job['song'])
-        dest = out / job['profile'] / job['song']
+        dest = out / job['song']
         for path, expected in [(next(dest.glob('audio.*')), source['audio_sha256']),
                                (dest / 'stems' / f"vocals.{job['vocals_format']}", source['vocals_sha256']),
                                (dest / 'lyrics_timeline.json', source['timeline_sha256'])]:
             if digest(path) != expected:
                 raise ValueError(f'Input changed since preparation: {path}')
-        config = AlignmentConfig(models=ModelPaths(ctc_model_path=job['model']), ctc_profile=job['profile'],
+        config = AlignmentConfig(models=ModelPaths(ctc_model_path=job['model']),
                                  enable_offset=True, keep_vocals=True, vocals_format=job['vocals_format'],
                                  ctc_score_threshold=job['config']['ctc_score_threshold'])
         assert config.as_dict() == job['config'], 'Frozen configuration mismatch'
@@ -211,14 +207,13 @@ def worker(out, job_id):
 
 def rollup(out, manifest):
     results = [json.loads(p.read_text()) for p in sorted((out / 'results').glob('*.json'))]
-    flat = [dict(song=r['song'], profile=r['profile'], **line) for r in results for line in r['lines']]
-    summary = {'updated_at': now(), 'expected_jobs': len(manifest['jobs']), 'finished_jobs': len(results), 'profiles': {}}
-    for profile in ('japanese', 'nextfire'):
-        jobs = [r for r in results if r['profile'] == profile]
-        lines = [l for l in flat if l['profile'] == profile]
-        eligible = sum(l['eligible'] for l in lines)
-        accepted = sum(l['accepted'] for l in lines)
-        summary['profiles'][profile] = dict(job_states=dict(Counter(r['state'] for r in jobs)),
+    flat = [dict(song=r['song'], **line) for r in results for line in r['lines']]
+    summary = {'updated_at': now(), 'expected_jobs': len(manifest['jobs']), 'finished_jobs': len(results)}
+    jobs = results
+    lines = flat
+    eligible = sum(l['eligible'] for l in lines)
+    accepted = sum(l['accepted'] for l in lines)
+    summary['model'] = dict(job_states=dict(Counter(r['state'] for r in jobs)),
             elapsed_job_seconds=round(sum(r['seconds'] for r in jobs), 3), lines=len(lines), eligible=eligible,
             accepted=accepted, fallback=sum(l['fallback'] for l in lines), acceptance_rate=accepted / eligible if eligible else None,
             offset_statuses=dict(Counter(r.get('timing', {}).get('offset_status', 'no_artifact') for r in jobs)),
@@ -227,20 +222,13 @@ def rollup(out, manifest):
             fallback_reasons=dict(Counter(reason for l in lines for reason in l['fallback_reasons'])),
             warnings=dict(Counter(w for l in lines for w in l['warnings'])),
             timing_sources=dict(Counter(l['timing_source'] for l in lines)),
-            categories={c: {'lines': sum(l['category'] == c for l in lines),
+        categories={c: {'lines': sum(l['category'] == c for l in lines),
                             'eligible': sum(l['eligible'] and l['category'] == c for l in lines),
                             'accepted': sum(l['accepted'] and l['category'] == c for l in lines)} for c in sorted({l['category'] for l in lines})},
             zero_duration_visible_units=sum(l['zero_duration_visible_units'] for l in lines),
             display_text_mismatches=sum(not l['display_text_matches'] for l in lines),
             display_order_errors=sum(not l['display_onset_monotonic'] for l in lines))
-    lookup = {(l['song'], l['source_index'], l['profile']): l for l in flat}
-    pairs = Counter()
-    for l in flat:
-        other = lookup.get((l['song'], l['source_index'], 'nextfire'))
-        if l['profile'] == 'japanese' and other and l['eligible'] and other['eligible']:
-            pairs[f"japanese_{'ctc' if l['accepted'] else 'fallback'}__nextfire_{'ctc' if other['accepted'] else 'fallback'}"] += 1
-    summary['paired_eligible_line_outcomes'] = dict(pairs)
-    summary['errors'] = [{k: r.get(k) for k in ('id', 'song', 'profile', 'state', 'error', 'stages')}
+    summary['errors'] = [{k: r.get(k) for k in ('id', 'song', 'state', 'error', 'stages')}
                          for r in results if r['state'] != 'ok']
     summary['limitations'] = manifest['limitations']
     save(out / 'summary.json', summary)
@@ -256,7 +244,7 @@ def rollup(out, manifest):
                 writer.writerow({k: json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else v for k, v in row.items()})
         tmp.replace(dest)
     csv_write('lines.csv', flat)
-    csv_write('songs.csv', [dict(id=r['id'], song=r['song'], profile=r['profile'], state=r['state'], seconds=r['seconds'],
+    csv_write('songs.csv', [dict(id=r['id'], song=r['song'], state=r['state'], seconds=r['seconds'],
         offset_ms=r.get('timing', {}).get('global_offset_ms'), offset_status=r.get('timing', {}).get('offset_status'),
         lines=len(r['lines']), eligible=sum(l['eligible'] for l in r['lines']), accepted=sum(l['accepted'] for l in r['lines']),
         fallback=sum(l['fallback'] for l in r['lines']), reasons=dict(Counter(x for l in r['lines'] for x in l['fallback_reasons'])),
@@ -279,9 +267,9 @@ def run(out):
                 continue
             save(out / 'status.json', dict(state='running', started_at=started_at, updated_at=now(),
                  total_jobs=len(manifest['jobs']), completed_jobs=len(list((out / 'results').glob('*.json'))), current_job=job))
-            emit(f"\n{now()} START {index+1}/{len(manifest['jobs'])} {job['profile']} {job['song']}")
+            emit(f"\n{now()} START {index+1}/{len(manifest['jobs'])} {job['song']}")
             started = time.monotonic()
-            path = out / 'logs' / f"{job['id']}-{job['profile']}.log"
+            path = out / 'logs' / f"{job['id']}.log"
             with path.open('w') as f:
                 process = subprocess.Popen([sys.executable, '-u', str(out / 'snapshot' / 'benchmark_samples.py'),
                     '--worker', job['id'], '--output', str(out)], stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
@@ -310,7 +298,7 @@ def run(out):
                     if process.poll() is None:
                         os.killpg(process.pid, signal.SIGKILL); process.wait()
             if not result_path.exists():
-                save(result_path, dict(id=job['id'], song=job['song'], profile=job['profile'],
+                save(result_path, dict(id=job['id'], song=job['song'],
                     state='timeout' if timed_out else 'process_error', seconds=round(time.monotonic()-started, 3),
                     error=f'Worker exit code {process.returncode}; see {path.name}', lines=[]))
             results = rollup(out, manifest)
@@ -335,15 +323,14 @@ def main():
     mode.add_argument('--worker')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--samples', type=Path, default=Path('samples'))
-    parser.add_argument('--japanese-model', type=Path)
-    parser.add_argument('--nextfire-model', type=Path)
+    parser.add_argument('--ctc-model', type=Path, required=False)
     parser.add_argument('--timeout', type=int, default=1800)
     parser.add_argument('--song-ids', nargs='+', help='restrict preparation to these sample IDs')
     parser.add_argument('--ctc-score-threshold', type=float, default=-1.5)
     args = parser.parse_args()
     if args.prepare:
-        if not args.japanese_model or not args.nextfire_model or args.timeout <= 0:
-            parser.error('prepare requires both models and a positive timeout')
+        if not args.ctc_model or args.timeout <= 0:
+            parser.error('prepare requires --ctc-model and a positive timeout')
         prepare(args)
     elif args.worker:
         return worker(args.output.resolve(), args.worker)
