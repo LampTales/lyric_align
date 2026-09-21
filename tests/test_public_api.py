@@ -24,6 +24,8 @@ def make_song(tmp_path: Path) -> Path:
 class PublicApiTests(unittest.TestCase):
     def test_default_reading_backend_is_sudachi(self):
         self.assertEqual(AlignmentConfig().g2p_backend, "sudachi")
+        self.assertEqual(AlignmentConfig().activity_confidence_threshold, 0.45)
+        self.assertEqual(AlignmentConfig().activity_projection_confidence_threshold, 0.35)
 
     def test_default_sudachi_backend_is_installed_and_usable(self):
         result = convert("夏です", "sudachi")

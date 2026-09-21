@@ -8,7 +8,7 @@ from tools.benchmark_samples import line_metrics, rollup, save
 def test_fallback_metrics_distinguish_gate_failure_from_non_sung():
     config = AlignmentConfig()
     line = AlignmentLine(0, 'summer', reading='さまー', status='fallback',
-                         alignment_status='fallback', coverage=0.5, ctc_score=-2.0)
+                         alignment_status='fallback', coverage=0.5, ctc_score=-2.5)
     metrics = line_metrics(line, config, {'status': 'done'})
     assert metrics['fallback_reasons'] == ['coverage_below_threshold', 'ctc_score_below_threshold']
     metadata = line_metrics(replace(line, status='non_sung'), config, {'status': 'done'})

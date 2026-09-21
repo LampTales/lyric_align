@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import AlignmentConfig
-from .ctc_text import build_target, group_ctc_tokens
+from .ctc_text import build_target, group_ctc_tokens, is_singable_target_char
 from .exceptions import StageUnavailableError
 from .g2p import split_mora
 ProgressCallback = Callable[[float, str], None]
@@ -153,6 +153,57 @@ def _repair_token_spans(tokens: list[dict[str, Any]], start_ms: int, end_ms: int
                 repaired[index + offset]["end_ms"] = left + round((right - left) * (offset + 1) / count)
         index = stop
     return repaired, repaired != tokens
+
+
+def _global_redistribute_token_spans(
+    tokens: list[dict[str, Any]], start_ms: int, end_ms: int,
+) -> tuple[list[dict[str, Any]], bool] | None:
+    """Redistribute a CTC window using the pre-repair token durations.
+
+    This is the coarse repair used only after the local repair leaves a
+    non-punctuation token collapsed.  Positive raw durations remain weights;
+    collapsed labels receive the median positive duration, matching the old
+    whole-window repair policy.  ``None`` means the window cannot provide one
+    integer millisecond to every token.
+    """
+    if not tokens:
+        return None
+    start_ms, end_ms = int(start_ms), int(end_ms)
+    available = end_ms - start_ms
+    if available < len(tokens):
+        return None
+    repaired = [dict(item) for item in tokens]
+    raw: list[tuple[int, int]] = []
+    for item in repaired:
+        a = max(start_ms, min(end_ms, int(item.get("start_ms", start_ms))))
+        b = max(a, min(end_ms, int(item.get("end_ms", a))))
+        raw.append((a, b))
+    positive = sorted(b - a for a, b in raw if b > a)
+    if not positive:
+        return None
+    fallback = positive[len(positive) // 2]
+    weights = [max(1, b - a) if b > a else fallback for a, b in raw]
+    total = max(1, sum(weights))
+    cursor = start_ms
+    for index, (item, weight) in enumerate(zip(repaired, weights)):
+        if index == len(repaired) - 1:
+            boundary = end_ms
+        else:
+            boundary = cursor + round(available * weight / total)
+            boundary = min(end_ms - (len(repaired) - index - 1), max(cursor + 1, boundary))
+        item["start_ms"], item["end_ms"] = cursor, boundary
+        cursor = boundary
+    return repaired, repaired != tokens
+
+
+def _singable_tokens(tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Select acoustic target labels, excluding punctuation labels."""
+    return [item for item in tokens if is_singable_target_char(str(item.get("text") or ""))]
+
+
+def _all_singable_tokens_positive(tokens: list[dict[str, Any]]) -> bool:
+    required = _singable_tokens(tokens)
+    return bool(required) and all(int(item["end_ms"]) > int(item["start_ms"]) for item in required)
 
 
 def _save_stem(tensor: Any, path: Path, sample_rate: int, config: AlignmentConfig, bitrate: str) -> None:
@@ -431,23 +482,57 @@ def align_ctc(
                 token_end = max(token_start, min(end, raw_end))
                 confidence = log_probs[a:b, vocab[char]].mean().item() if b > a else -99.0
                 tokens.append({**record, "start_ms": token_start, "end_ms": token_end, "frame_confidence": round(float(confidence), 3)})
-            tokens, repaired = _repair_token_spans(tokens, window_start, window_end)
+            raw_tokens = [dict(item) for item in tokens]
+            tokens, locally_repaired = _repair_token_spans(tokens, window_start, window_end)
             updated = dict(line, warnings=list(line.get("warnings") or []))
             updated["ctc_score"] = round(score, 4)
-            updated["tokens"] = tokens
             updated["ctc_window"] = {"start_ms": window_start, "end_ms": window_end, "source": window_source, "profile": "nextfire", "target": target_text}
-            positive_ratio = sum(int(item["end_ms"] > item["start_ms"]) for item in tokens) / max(1, len(tokens))
-            updated["alignment_status"] = "ctc" if coverage >= config.ctc_coverage_threshold and score >= config.ctc_score_threshold and positive_ratio >= 1.0 else "fallback"
+            base_quality = coverage >= config.ctc_coverage_threshold and score >= config.ctc_score_threshold
+            global_repaired = False
+            required = _singable_tokens(tokens)
+            raw_required = _singable_tokens(raw_tokens)
+            raw_has_positive_evidence = any(
+                int(item["end_ms"]) > int(item["start_ms"]) for item in raw_required
+            )
+            if base_quality and required and not raw_has_positive_evidence:
+                updated.setdefault("warnings", []).append(
+                    "CTC global redistribution skipped: no positive acoustic token evidence"
+                )
+            elif base_quality and required and not _all_singable_tokens_positive(tokens):
+                # Do not compound local edits.  A whole-window redistribution
+                # is useful only when the raw CTC path contains some positive
+                # acoustic evidence; otherwise it is indistinguishable from
+                # interpolation and must remain a fallback.
+                redistributed = _global_redistribute_token_spans(raw_tokens, window_start, window_end)
+                if redistributed is not None and _all_singable_tokens_positive(redistributed[0]):
+                    tokens, global_repaired = redistributed
+                else:
+                    updated.setdefault("warnings", []).append("CTC global duration redistribution unavailable")
+            updated["tokens"] = tokens
+            updated["alignment_status"] = (
+                "ctc"
+                if base_quality and raw_has_positive_evidence and _all_singable_tokens_positive(tokens)
+                else "fallback"
+            )
             if updated["alignment_status"] == "ctc":
                 updated["mora"] = group_ctc_tokens(tokens)
                 updated["coverage"] = round(coverage, 3)
                 updated["method"] = "demucs+ctc"
-                if repaired:
-                    updated.setdefault("warnings", []).append("CTC zero-duration spans repaired for display")
+                updated["timing_source"] = "ctc_rescaled" if global_repaired else "ctc"
+                if global_repaired:
+                    updated.setdefault("warnings", []).append("CTC global duration redistribution applied")
+                elif locally_repaired:
+                    updated.setdefault("warnings", []).append("CTC local span repair applied")
+                if any(
+                    not is_singable_target_char(str(item.get("text") or ""))
+                    and int(item["end_ms"]) <= int(item["start_ms"])
+                    for item in tokens
+                ):
+                    updated.setdefault("warnings", []).append("CTC zero-duration punctuation accepted")
             else:
                 updated["coverage"] = round(coverage, 3)
                 updated.setdefault("warnings", []).append("CTC quality gate failed")
-                if positive_ratio < 1.0:
+                if required and not _all_singable_tokens_positive(tokens):
                     updated["warnings"].append("CTC produced zero-duration token; using interpolation")
             output.append(updated)
             completed += 1

@@ -13,6 +13,7 @@ from typing import Any
 from .g2p import kata_to_hira, romaji, split_mora
 
 _LATIN = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*")
+SINGABLE_TARGET_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz")
 _EXTENDED = {
     "ゔ": "vu", "ゔぁ": "va", "ゔぃ": "vi", "ゔぇ": "ve", "ゔぉ": "vo",
     "ふぁ": "fa", "ふぃ": "fi", "ふぇ": "fe", "ふぉ": "fo", "ふゅ": "fyu",
@@ -34,6 +35,17 @@ def _latin(value: str) -> str:
 def _kana(value: str) -> str:
     value = kata_to_hira(value)
     return _EXTENDED.get(value, romaji(value).replace(" ", ""))
+
+
+def is_singable_target_char(value: str) -> bool:
+    """Return whether a NextFire target label needs acoustic duration.
+
+    The model target is model-specific: romaji letters and English spelling
+    letters represent sung material, while the apostrophe is retained for
+    contractions but is only punctuation.  Keep this predicate beside target
+    construction so timing quality gates do not infer roles from display text.
+    """
+    return str(value) in SINGABLE_TARGET_CHARS
 
 
 def build_target(line: dict[str, Any], vocab: dict[str, int]) -> tuple[list[dict[str, Any]], float, str]:
@@ -111,7 +123,7 @@ def build_target(line: dict[str, Any], vocab: dict[str, int]) -> tuple[list[dict
         sources = [i for a, b, i, _ in ranges if a < end and b > pos]
         for char in value:
             full.append(char)
-            if char not in vocab or char not in "abcdefghijklmnopqrstuvwxyz'":
+            if char not in vocab or (char not in SINGABLE_TARGET_CHARS and char != "'"):
                 continue
             record = dict(text=char, source_reading_index=pos, source_mora_indices=sources,
                           source_unit=f"{pos}:{end}", source_text=reading[pos:end])

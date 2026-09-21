@@ -3,7 +3,11 @@ from copy import deepcopy
 import pytest
 
 from lyric_align.pipeline import _apply_timing_policy, _build_display_units
-from lyric_align.stages import _repair_token_spans
+from lyric_align.stages import (
+    _all_singable_tokens_positive,
+    _global_redistribute_token_spans,
+    _repair_token_spans,
+)
 
 
 def line_with_edges():
@@ -79,6 +83,37 @@ def test_insufficient_repair_interval_remains_quality_failure():
     assert all(0 <= t['start_ms'] <= t['end_ms'] <= 1 for t in repaired)
 
 
+def test_zero_duration_punctuation_is_not_required_for_ctc_quality():
+    tokens = [
+        {'text': 'a', 'start_ms': 0, 'end_ms': 100},
+        {'text': "'", 'start_ms': 100, 'end_ms': 100},
+    ]
+    assert _all_singable_tokens_positive(tokens)
+
+
+def test_zero_duration_sung_token_requires_global_repair():
+    tokens = [
+        {'text': 'a', 'start_ms': 0, 'end_ms': 0},
+        {'text': 'b', 'start_ms': 0, 'end_ms': 100},
+        {'text': "'", 'start_ms': 100, 'end_ms': 100},
+    ]
+    assert not _all_singable_tokens_positive(tokens)
+    redistributed = _global_redistribute_token_spans(tokens, 0, 300)
+    assert redistributed is not None
+    repaired, changed = redistributed
+    assert changed
+    assert _all_singable_tokens_positive(repaired)
+    assert repaired[-1]['end_ms'] > repaired[-1]['start_ms']
+
+
+def test_global_repair_rejects_window_without_positive_acoustic_evidence():
+    tokens = [
+        {'text': 'a', 'start_ms': 0, 'end_ms': 0},
+        {'text': "'", 'start_ms': 0, 'end_ms': 0},
+    ]
+    assert _global_redistribute_token_spans(tokens, 0, 300) is None
+
+
 def test_fallback_policy_is_idempotent():
     line = line_with_edges()
     line['alignment_status'] = 'fallback'
@@ -88,3 +123,10 @@ def test_fallback_policy_is_idempotent():
     assert line == first
     assert line['mora'][0]['start_ms'] == 1000
     assert line['mora'][-1]['end_ms'] == 3000
+
+
+def test_timing_policy_preserves_global_ctc_repair_source():
+    line = line_with_edges()
+    line['timing_source'] = 'ctc_rescaled'
+    _apply_timing_policy([line])
+    assert line['timing_source'] == 'ctc_rescaled'

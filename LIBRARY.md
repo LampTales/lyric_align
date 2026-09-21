@@ -206,11 +206,18 @@ request correctly reports that the vocal input is unavailable; request
 CTC. The retained instrumental stem and completed alignment do not require
 the vocal stem for ordinary rendering or cache hits.
 
-CTC paths occasionally assign adjacent symbols to one acoustic frame. Before
-the quality gate, the library repairs such collapsed spans by a deterministic
-duration-weighted partition of the sentence interval and records a warning on
-the line. This keeps cumulative karaoke highlighting continuous without
-claiming additional acoustic evidence.
+CTC paths occasionally assign adjacent symbols to one acoustic frame. The
+library first repairs the affected local run while retaining unrelated CTC
+boundaries. If a non-punctuation target token is still non-positive, it
+restores the raw CTC spans and tries the historical whole-window,
+duration-weighted redistribution. Only when that also cannot produce valid
+positive spans does the line use activity-bounded or sentence interpolation.
+
+The NextFire target treats `a-z` labels as sung material. Ordinary punctuation
+is not a target, and the apostrophe retained in an English contraction is
+punctuation for timing purposes; zero-duration punctuation is therefore valid
+and does not trigger a fallback. A line with no sung target still falls back
+because it has no acoustic evidence.
 
 ### Temporary test data
 

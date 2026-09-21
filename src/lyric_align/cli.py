@@ -6,7 +6,12 @@ import argparse
 import json
 from pathlib import Path
 
-from .config import AlignmentConfig, ModelPaths
+from .config import (
+    AlignmentConfig,
+    DEFAULT_ACTIVITY_PROJECTION_CONFIDENCE_THRESHOLD,
+    DEFAULT_CTC_ACTIVITY_CONFIDENCE_THRESHOLD,
+    ModelPaths,
+)
 from .pipeline import prepare_song, validate_song
 
 
@@ -32,7 +37,11 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--instrumental-bitrate", default="320k")
     prepare.add_argument("--sample-rate", type=int, default=16000)
     prepare.add_argument("--ctc-margin-ms", type=int, default=500)
-    prepare.add_argument("--ctc-score-threshold", type=float, default=-1.5)
+    prepare.add_argument("--ctc-activity-confidence-threshold", type=float, default=DEFAULT_CTC_ACTIVITY_CONFIDENCE_THRESHOLD,
+                         help="minimum activity confidence for narrowing CTC search windows")
+    prepare.add_argument("--activity-projection-confidence-threshold", type=float, default=DEFAULT_ACTIVITY_PROJECTION_CONFIDENCE_THRESHOLD,
+                         help="minimum activity confidence for fallback interpolation and display projection")
+    prepare.add_argument("--ctc-score-threshold", type=float, default=-2.25)
     prepare.add_argument("--ctc-coverage-threshold", type=float, default=0.8)
     prepare.add_argument("--offset-low-ms", type=int, default=-2000)
     prepare.add_argument("--offset-high-ms", type=int, default=2000)
@@ -62,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
         instrumental_bitrate=args.instrumental_bitrate,
         sample_rate=args.sample_rate,
         ctc_margin_ms=args.ctc_margin_ms,
+        activity_confidence_threshold=args.ctc_activity_confidence_threshold,
+        activity_projection_confidence_threshold=args.activity_projection_confidence_threshold,
         ctc_score_threshold=args.ctc_score_threshold,
         ctc_coverage_threshold=args.ctc_coverage_threshold,
         offset_low_ms=args.offset_low_ms,

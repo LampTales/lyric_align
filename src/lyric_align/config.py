@@ -7,6 +7,10 @@ import math
 from pathlib import Path
 
 
+DEFAULT_CTC_ACTIVITY_CONFIDENCE_THRESHOLD = 0.45
+DEFAULT_ACTIVITY_PROJECTION_CONFIDENCE_THRESHOLD = 0.35
+
+
 @dataclass(frozen=True)
 class ModelPaths:
     """Paths for the acoustic models used by implemented stages.
@@ -67,12 +71,18 @@ class AlignmentConfig:
     offset_acoustic_verify: bool = False
     offset_acoustic_min_margin: float = 0.15
     ctc_margin_ms: int = 500
-    # Activity endpoints are used to narrow CTC only when the detector is
-    # sufficiently confident.  A small margin protects consonants at the
-    # boundary without feeding a whole silent/interlude window to CTC.
+    # Activity endpoints use two intentional confidence gates.  The higher
+    # gate narrows the CTC search window; the lower gate is only for
+    # approximate fallback interpolation and display-character projection.
+    # A small CTC margin protects consonants at the boundary without feeding a
+    # whole silent/interlude window to the model.
     ctc_activity_margin_ms: int = 120
-    activity_confidence_threshold: float = 0.45
-    ctc_score_threshold: float = -1.5
+    # This public field retains its historical name; it is specifically the
+    # CTC-search gate. The CLI/environment use the explicit CTC name.
+    activity_confidence_threshold: float = DEFAULT_CTC_ACTIVITY_CONFIDENCE_THRESHOLD
+    activity_projection_confidence_threshold: float = DEFAULT_ACTIVITY_PROJECTION_CONFIDENCE_THRESHOLD
+    # User-validated operating point for the current NextFire model.
+    ctc_score_threshold: float = -2.25
     ctc_coverage_threshold: float = 0.8
     # Change this internal cache marker when processing policy changes
     # invalidate cached alignments. It is not the Python package version.
@@ -101,6 +111,8 @@ class AlignmentConfig:
             raise ValueError("ctc_activity_margin_ms must not be negative")
         if not 0.0 <= float(self.activity_confidence_threshold) <= 1.0:
             raise ValueError("activity_confidence_threshold must be between 0 and 1")
+        if not 0.0 <= float(self.activity_projection_confidence_threshold) <= 1.0:
+            raise ValueError("activity_projection_confidence_threshold must be between 0 and 1")
         if not math.isfinite(float(self.ctc_score_threshold)):
             raise ValueError("ctc_score_threshold must be finite")
         if not 0.0 <= float(self.ctc_coverage_threshold) <= 1.0:
@@ -137,6 +149,7 @@ class AlignmentConfig:
             "ctc_margin_ms": self.ctc_margin_ms,
             "ctc_activity_margin_ms": self.ctc_activity_margin_ms,
             "activity_confidence_threshold": self.activity_confidence_threshold,
+            "activity_projection_confidence_threshold": self.activity_projection_confidence_threshold,
             "ctc_score_threshold": self.ctc_score_threshold,
             "ctc_coverage_threshold": self.ctc_coverage_threshold,
             "pipeline_version": self.pipeline_version,

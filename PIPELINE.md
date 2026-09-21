@@ -125,6 +125,20 @@ python apply_offset.py \
 
 `activity_baseline.py` 使用 FFmpeg 解码为 16 kHz 单声道，再计算约 30 ms 短时 RMS。在句级窗口内寻找活动边界，仅用于缩小后续搜索范围。它不能区分人声和伴奏，结果必须带 warning。
 
+活动置信度有两个用途，门限不能混为一个：
+
+- `activity_confidence_threshold=0.45` 是 CTC 搜索门限。只有达到该门限且同时存在有效的 `singing_start_ms`/`singing_end_ms`，才用活动边界缩小 CTC 窗口；否则 CTC 使用歌词原始句区间和搜索 margin。
+- `activity_projection_confidence_threshold=0.35` 是回退和显示投影门限。CTC 被拒绝或字符没有声学锚点时，达到该门限的活动边界仍可用于整句插值和 `display_units` 的局部投影。它不会反过来改变已经接受的 CTC token/mora 边界。
+
+较低的第二个门限是有意保留弱人声边界的设计：回退时仍让扫色获得可用的活动范围，而不让同样不够可靠的边界限制 CTC 搜索。
+
+命令行参数和 KTV 环境变量分别使用
+`--ctc-activity-confidence-threshold` /
+`LYRIC_CTC_ACTIVITY_CONFIDENCE_THRESHOLD`，以及
+`--activity-projection-confidence-threshold` /
+`LYRIC_ACTIVITY_PROJECTION_CONFIDENCE_THRESHOLD`。旧的
+`LYRIC_ACTIVITY_CONFIDENCE_THRESHOLD` 仍作为 CTC 门限的兼容别名。
+
 ### 5.2 人声分离
 
 Demucs 的模型缓存通过：
@@ -199,17 +213,19 @@ CTC 模型输入人声波形，输出每个声学帧对词表标签的概率。�
 运行时按以下顺序选择：
 
 ```text
-CTC 路径完整、覆盖率足够、分数过阈值（零时长边界先做可审计的显示修复）
+CTC 路径完整、覆盖率足够、分数过阈值
+  → 先做局部 token 修复；若非标点 token 仍有非正时长，再从原始 CTC spans 做整体加权重分配
+  → 标点 token 允许零时长，不触发回退
   → 使用 CTC mora 时间
 
-否则存在可靠人声活动窗口
+上述 CTC 修复仍失败，且存在可靠人声活动窗口
   → 使用活动窗口内插值
 
 否则
   → 使用原句级窗口内插值
 ```
 
-质量门控必须是确定性的，并把阈值和处理策略记录在产物中。当前 CTC 探针默认分数阈值为 `-1.5`，这是实验阈值，不应直接视为最终产品阈值。
+只有代表罗马字或英文拼写的 `a-z` token 被要求具有正时长；普通标点和英文缩写撇号可以为零时长。整体重分配使用局部修复前保存的原始 spans，避免重复放大局部边界变化。质量门控必须是确定性的，并把阈值和处理策略记录在产物中。当前 NextFire 的默认 CTC 分数阈值为 `-2.25`，这是按当前样本测试选定的运行点。
 
 ## 8. 渲染器接入约束
 

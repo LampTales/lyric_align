@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import AlignmentConfig
+from .config import AlignmentConfig, DEFAULT_ACTIVITY_PROJECTION_CONFIDENCE_THRESHOLD
 from .activity import estimate_voice_endings
 from .exceptions import InputValidationError, StageUnavailableError
 from .g2p import NON_SUNG, build_surface_spans, convert, is_japanese_char, romaji, split_mora
@@ -48,7 +48,7 @@ def _stage_signature(config: AlignmentConfig, stage: str) -> str:
     elif stage == "demucs":
         values = {"demucs_model_name": config.demucs_model_name, "demucs_model_path": str(config.models.demucs_model_path) if config.models.demucs_model_path else None, "device": config.device, "keep_vocals": config.keep_vocals, "keep_instrumental": config.keep_instrumental, "vocals_format": config.vocals_format, "instrumental_format": config.instrumental_format, "vocals_bitrate": config.vocals_bitrate, "instrumental_bitrate": config.instrumental_bitrate}
     elif stage == "ctc":
-        values = {"ctc_model_path": str(config.models.ctc_model_path) if config.models.ctc_model_path else None, "device": config.device, "sample_rate": config.sample_rate, "ctc_margin_ms": config.ctc_margin_ms, "ctc_activity_margin_ms": config.ctc_activity_margin_ms, "activity_confidence_threshold": config.activity_confidence_threshold, "ctc_score_threshold": config.ctc_score_threshold, "ctc_coverage_threshold": config.ctc_coverage_threshold, "pipeline_version": config.pipeline_version}
+        values = {"ctc_model_path": str(config.models.ctc_model_path) if config.models.ctc_model_path else None, "device": config.device, "sample_rate": config.sample_rate, "ctc_margin_ms": config.ctc_margin_ms, "ctc_activity_margin_ms": config.ctc_activity_margin_ms, "activity_confidence_threshold": config.activity_confidence_threshold, "activity_projection_confidence_threshold": config.activity_projection_confidence_threshold, "ctc_score_threshold": config.ctc_score_threshold, "ctc_coverage_threshold": config.ctc_coverage_threshold, "pipeline_version": config.pipeline_version}
     else:
         values = config.as_dict()
     payload = json.dumps(values, ensure_ascii=False, sort_keys=True).encode()
@@ -133,7 +133,7 @@ def _timed_mora(reading: str, start: int, end: int) -> list[dict[str, Any]]:
 
 
 def _reliable_activity_bounds(
-    line: dict[str, Any], *, confidence_threshold: float = 0.35,
+    line: dict[str, Any], *, confidence_threshold: float = DEFAULT_ACTIVITY_PROJECTION_CONFIDENCE_THRESHOLD,
 ) -> tuple[int, int] | None:
     """Return activity bounds when they are safe for display projection.
 
@@ -159,7 +159,8 @@ def _reliable_activity_bounds(
 
 
 def _build_display_units(
-    line: dict[str, Any], *, activity_confidence_threshold: float = 0.35,
+    line: dict[str, Any], *, activity_projection_confidence_threshold: float = DEFAULT_ACTIVITY_PROJECTION_CONFIDENCE_THRESHOLD,
+    activity_confidence_threshold: float | None = None,
 ) -> list[dict[str, Any]]:
     """Build the renderer-facing per-character timing contract.
 
@@ -169,12 +170,17 @@ def _build_display_units(
     second timeline.  Ambiguous multi-kanji spans are divided over their
     assigned mora, which is deterministic and keeps every glyph visible.
     """
+    # Keep the old keyword as a compatibility alias for callers using the
+    # public helper directly.  New pipeline code names this the projection
+    # threshold because it is deliberately lower than the CTC search gate.
+    if activity_confidence_threshold is not None:
+        activity_projection_confidence_threshold = activity_confidence_threshold
     text = str(line.get("text") or "")
     if not text:
         return []
     start, end = int(line.get("start_ms", 0)), int(line.get("end_ms", 0))
     activity_bounds = _reliable_activity_bounds(
-        line, confidence_threshold=activity_confidence_threshold,
+        line, confidence_threshold=activity_projection_confidence_threshold,
     )
     # Constrain only unanchored projection. Accepted CTC anchors may use the
     # acoustic search margin outside the activity estimate and stay intact.
@@ -456,16 +462,19 @@ def _split_overlapping_display_units(units: list[dict[str, Any]]) -> bool:
 
 
 def _apply_timing_policy(
-    lines: list[dict[str, Any]], *, activity_confidence_threshold: float = 0.35,
+    lines: list[dict[str, Any]], *, activity_projection_confidence_threshold: float = DEFAULT_ACTIVITY_PROJECTION_CONFIDENCE_THRESHOLD,
+    activity_confidence_threshold: float | None = None,
 ) -> list[dict[str, Any]]:
     """Choose a trustworthy character-time source before writing the artifact."""
+    if activity_confidence_threshold is not None:
+        activity_projection_confidence_threshold = activity_confidence_threshold
     for line in lines:
         if not line.get("reading") or line.get("status") == "non_sung":
             line["timing_source"] = "line_interpolation"
             continue
         start, end = int(line.get("start_ms", 0)), int(line.get("end_ms", 0))
         activity_bounds = _reliable_activity_bounds(
-            line, confidence_threshold=activity_confidence_threshold,
+            line, confidence_threshold=activity_projection_confidence_threshold,
         )
         activity_ok = activity_bounds is not None
         bounded_start, bounded_end = activity_bounds if activity_bounds else (start, end)
@@ -479,7 +488,8 @@ def _apply_timing_policy(
             # Accepted CTC times already refer to the audio. Rescaling them
             # from the sentence interval to activity bounds moves valid
             # internal anchors (and applies repeatedly on partial reruns).
-            line["timing_source"] = "ctc"
+            if line.get("timing_source") != "ctc_rescaled":
+                line["timing_source"] = "ctc"
             continue
         if activity_ok:
             line["mora"] = _timed_mora(str(line.get("reading") or ""), bounded_start, bounded_end)
@@ -758,11 +768,19 @@ def prepare_song(
         # Offset-only enhancement also honors the temporary-vocal policy.
         (song_dir / stem_paths["vocals"]).unlink(missing_ok=True)
         stem_paths["vocals"] = None
-    # Retain the historical 0.35 gate for approximate fallback/projection;
-    # acoustic search uses config.activity_confidence_threshold (default 0.45).
-    line_values = _apply_timing_policy(line_values)
+    # The CTC search gate (default 0.45) is intentionally stricter than the
+    # projection/fallback gate (default 0.35). A weak but useful activity
+    # boundary may still guide interpolation and display placement after CTC
+    # has declined to use it for acoustic search.
+    line_values = _apply_timing_policy(
+        line_values,
+        activity_projection_confidence_threshold=config.activity_projection_confidence_threshold,
+    )
     for line in line_values:
-        line["display_units"] = _build_display_units(line)
+        line["display_units"] = _build_display_units(
+            line,
+            activity_projection_confidence_threshold=config.activity_projection_confidence_threshold,
+        )
     # The vocal stem is intentionally temporary in the default model flow.
     # Do not leave a stale path in the persisted stage journal after CTC has
     # removed it, otherwise a later lightweight rerun could advertise a file

@@ -326,7 +326,7 @@ def main():
     parser.add_argument('--ctc-model', type=Path, required=False)
     parser.add_argument('--timeout', type=int, default=1800)
     parser.add_argument('--song-ids', nargs='+', help='restrict preparation to these sample IDs')
-    parser.add_argument('--ctc-score-threshold', type=float, default=-1.5)
+    parser.add_argument('--ctc-score-threshold', type=float, default=-2.25)
     args = parser.parse_args()
     if args.prepare:
         if not args.ctc_model or args.timeout <= 0:
