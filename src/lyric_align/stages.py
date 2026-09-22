@@ -450,9 +450,12 @@ def align_ctc(
                 window_start = max(start, int(activity_start) - config.ctc_activity_margin_ms)
                 window_end = min(end, int(activity_end) + config.ctc_activity_margin_ms)
                 window_source = "activity_bounds"
+                redistribution_start = max(start, int(activity_start))
+                redistribution_end = min(end, int(activity_end))
             else:
                 window_start, window_end = start, end
                 window_source = "line_bounds"
+                redistribution_start, redistribution_end = window_start, window_end
             search_margin = 0 if bounded else config.ctc_margin_ms
             left = max(0, int((window_start - search_margin) * config.sample_rate / 1000))
             right = min(len(audio), int((window_end + search_margin) * config.sample_rate / 1000))
@@ -503,7 +506,11 @@ def align_ctc(
                 # is useful only when the raw CTC path contains some positive
                 # acoustic evidence; otherwise it is indistinguishable from
                 # interpolation and must remain a fallback.
-                redistributed = _global_redistribute_token_spans(raw_tokens, window_start, window_end)
+                # Keep CTC search margins for recognition, but constrain the
+                # final whole-window repair to reliable singing boundaries.
+                redistributed = _global_redistribute_token_spans(
+                    raw_tokens, redistribution_start, redistribution_end,
+                )
                 if redistributed is not None and _all_singable_tokens_positive(redistributed[0]):
                     tokens, global_repaired = redistributed
                 else:
