@@ -296,7 +296,7 @@ backend image
 PYTHONPATH=src python -m lyric_align.cli prepare \
   --song-dir samples/<song> --stages reading demucs ctc \
   --demucs-model-path /models/demucs/<snapshot> \
-  --ctc-model-path /models/mms-300m-ForcedAligner-karaoke-ja-Latn
+  --ctc-model-path /models/huggingface/hub/models--NextFire--mms-300m-ForcedAligner-karaoke-ja-Latn/snapshots/2ab2b5f46539ee284703c281f286b01d2410ee12
 ```
 
 阶段结果会写入 `alignment.json` 和 `preprocessing.json`。Demucs 的压缩 stem 可独立复用；CTC 失败时下次从句级窗口重新计算，不保存帧级 checkpoint。

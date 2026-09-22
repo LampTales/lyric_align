@@ -5,7 +5,7 @@
 ```bash
 conda run -n ktv python -u tools/benchmark_samples.py --prepare \
   --output temp/nextfire-20260919 \
-  --ctc-model ../ref/mms-300m-ForcedAligner-karaoke-ja-Latn
+  --ctc-model models/huggingface/hub/models--NextFire--mms-300m-ForcedAligner-karaoke-ja-Latn/snapshots/2ab2b5f46539ee284703c281f286b01d2410ee12
 ```
 
 ## 样本
