@@ -106,6 +106,44 @@ def test_boundary_rejections_are_diagnostic_and_switchable(monkeypatch):
     assert len(mix['eligible_candidates']) == 101
 
 
+def test_boundary_candidate_far_from_energy_peak_is_not_applied(monkeypatch):
+    starts = [2000, 12000]
+    lines = [
+        {'start_ms': 2000, 'end_ms': 4000},
+        {'start_ms': 12000, 'end_ms': 14000},
+    ]
+    times = np.arange(15, 20000, 10, dtype=float)
+    rms = np.ones(times.shape)
+    monkeypatch.setattr(offset, '_decode', lambda *args: np.zeros(1))
+    monkeypatch.setattr(offset, '_activity', lambda *args: (times, rms))
+    monkeypatch.setattr(
+        offset,
+        '_boundary_anchors',
+        lambda *args: ([{'offset_low_ms': -1200, 'offset_high_ms': -800}], []),
+    )
+    # Make the unconstrained energy peak +1000ms and the surviving boundary
+    # candidate -1000ms. Both have enough gain to pass the old gates.
+    values = {1100: 1.0, 750: 0.001, 1350: 1.0, 1000: 1.0,
+              -900: 0.5, -1250: 0.2, -650: 0.5, -1000: 0.5}
+
+    def interp(points, _times, _values, left=None, right=None):
+        result = []
+        for point in np.asarray(points):
+            source = min(starts, key=lambda item: abs(point - item))
+            result.append(values.get(int(round(point - source)), 0.2))
+        return np.asarray(result)
+
+    monkeypatch.setattr(offset.np, 'interp', interp)
+    result = offset.estimate_offset(
+        Path('vocals.wav'), starts, AlignmentConfig(), lines=lines, vocal=True,
+    )
+    assert result['boundary_check']['raw_best_offset_ms'] == 1000
+    assert result['selected_candidate_ms'] == -1000
+    assert result['energy_disagreement_ms'] == 2000
+    assert result['offset_ms'] == 0
+    assert result['boundary_check']['status'] == 'energy_conflict'
+
+
 @pytest.mark.parametrize('values', [
     {'offset_silence_ms': 0}, {'offset_sustain_ms': -1},
     {'offset_boundary_tolerance_ms': -1}, {'offset_acoustic_min_margin': float('nan')},

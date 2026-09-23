@@ -116,9 +116,12 @@ starts alone is insufficient: an internal lyric pause is not a new boundary.
 Ambiguous events are skipped. Each anchor allows its onset-to-source-start
 difference plus/minus `offset_boundary_tolerance_ms`; conflicting anchors
 return zero/uncertain. Surviving candidates still face the original energy
-gain and peak-margin gates. Without reliable anchors, the original energy
-decision remains; mixed audio skips the boundary check explicitly. This is an
-energy heuristic and cannot identify unmarked humming or separation leakage.
+gain and peak-margin gates. If the boundary-selected candidate disagrees with
+the raw energy winner by more than `offset_boundary_tolerance_ms`, the signals
+are treated as conflicting and the result is zero/uncertain. Without reliable
+anchors, the original energy decision remains; mixed audio skips the boundary
+check explicitly. This is an energy heuristic and cannot identify unmarked
+humming or separation leakage.
 
 Set `offset_acoustic_verify=True` (CLI: `--offset-acoustic-verify`) to enable
 an **experimental, conservative veto** before any lyric timestamps are shifted.

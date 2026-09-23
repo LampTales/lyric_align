@@ -145,7 +145,20 @@ def estimate_offset(
     local_margin = best_score - max(neighbors) if neighbors else best_score
     at_boundary = best_offset in {config.offset_low_ms, config.offset_high_ms}
     gain = best_score - zero_score
-    accepted = bool(eligible) and gain >= MIN_GAIN_OVER_ZERO and local_margin >= MIN_LOCAL_PEAK_MARGIN and not at_boundary
+    # A boundary anchor is useful for filtering an ambiguous energy peak, but
+    # one weak/early vocal run must not replace a substantially different
+    # energy solution on its own.  In that situation the two independent
+    # signals disagree; returning zero is safer than applying the constrained
+    # candidate.  Reuse the boundary tolerance as the maximum disagreement so
+    # this policy remains tied to the configured onset uncertainty.
+    energy_disagreement = abs(int(best_offset) - int(raw_best)) if anchors and eligible else 0
+    boundary_energy_conflict = bool(
+        anchors and eligible
+        and energy_disagreement > config.offset_boundary_tolerance_ms
+    )
+    if boundary_energy_conflict:
+        boundary_status = "energy_conflict"
+    accepted = bool(eligible) and gain >= MIN_GAIN_OVER_ZERO and local_margin >= MIN_LOCAL_PEAK_MARGIN and not at_boundary and not boundary_energy_conflict
     if anchors and not eligible:
         boundary_status = "conflicting_or_out_of_range_anchors"
     return {
@@ -154,6 +167,7 @@ def estimate_offset(
         "selected_candidate_ms": int(best_offset) if eligible else None,
         "score": round(best_score, 6), "zero_score": round(zero_score, 6),
         "gain_over_zero": round(gain, 6), "peak_margin": round(local_margin, 6),
+        "energy_disagreement_ms": int(energy_disagreement),
         "at_boundary": at_boundary,
         "boundary_check": {
             "status": boundary_status, "raw_best_offset_ms": raw_best,

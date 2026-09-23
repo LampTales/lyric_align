@@ -110,6 +110,11 @@ python prepare_reading.py --backend sudachi --out results/reading_sudachi
 `global_offset_ms=0` 并标记 `offset_status="uncertain"`。这是面向无人值守 KTV
 队列的保守启发式门控，不是统计学显著性检验。
 
+当人声边界筛选出的候选与未筛选的能量最高候选相差超过
+`offset_boundary_tolerance_ms` 时，认为边界和能量证据互相冲突，也保留
+`global_offset_ms=0`。单个低能量预唱或分离残留因此不能单独把整首歌拉到另一组
+能量峰；诊断中的 `boundary_check.status` 会记录为 `energy_conflict`。
+
 `apply_offset.py` 可把候选偏移写入独立的修正时间轴，永远不覆盖 `lyrics_timeline.json`：
 
 ```bash
