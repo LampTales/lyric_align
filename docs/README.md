@@ -10,6 +10,8 @@
 - [DESIGN_RESEARCH.md](DESIGN_RESEARCH.md)：较早的方案调研、候选技术和实验路线。它记录设计背景，不代表所有建议都已实现。
 - [OFFSET_RESEARCH_NOTES.md](OFFSET_RESEARCH_NOTES.md)：2026-09 offset 实验记录和后续研究问题。它记录当前实现的已知现象，不是新的配置规范。
 - [../CHANGELOG.md](../CHANGELOG.md)：当前开发线的变更摘要；项目尚未按正式版本发布维护。
+- [CHINESE_NEXTFIRE.md](CHINESE_NEXTFIRE.md) 记录手动普通话、粤语路径的整曲验证和阈值比较。
+- [LANGUAGE_DETECTION.md](LANGUAGE_DETECTION.md) 记录自动选路依据、未决情况和样本评测。
 
 ## 维护规则
 

@@ -7,6 +7,8 @@ dependencies:
   - pip:
       # Full research environment. The supported production/default G2P path
       # uses Sudachi; pykakasi and OpenJTalk are kept for comparisons.
+      - pypinyin==0.55.0
+      - ToJyutping==3.2.0
       - pykakasi==2.3.0
       - sudachipy==0.6.11
       - sudachidict_core==20260723

@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import AlignmentConfig
-from .ctc_text import build_target, group_ctc_tokens, is_singable_target_char
+from .languages import LANGUAGES
+from .ctc_text import group_ctc_tokens, is_singable_target_char
 from .exceptions import StageUnavailableError
 from .g2p import split_mora
 ProgressCallback = Callable[[float, str], None]
@@ -411,7 +412,7 @@ def align_ctc(
     config: AlignmentConfig,
     progress: ProgressCallback | None = None,
 ) -> list[dict[str, Any]]:
-    """Align known Japanese readings to a vocal stem using a CTC model."""
+    """Align a selected lyric reading to a vocal stem using NextFire."""
     try:
         import torch  # noqa: F401
         import transformers  # noqa: F401
@@ -460,7 +461,7 @@ def align_ctc(
             left = max(0, int((window_start - search_margin) * config.sample_rate / 1000))
             right = min(len(audio), int((window_end + search_margin) * config.sample_rate / 1000))
             segment = audio[left:right]
-            char_records, coverage, target_text = build_target(line, vocab)
+            char_records, coverage, target_text = LANGUAGES[config.language].target(line, vocab)
             chars = [record["text"] for record in char_records]
             target = [int(vocab[char]) for char in chars]
             if len(segment) < 400 or not target:
@@ -572,7 +573,7 @@ def score_offset_candidates(
             for line in lines:
                 left = round((int(line["start_ms"]) + offset) * config.sample_rate / 1000)
                 right = round((int(line["end_ms"]) + offset) * config.sample_rate / 1000)
-                records, coverage, _ = build_target(line, vocab)
+                records, coverage, _ = LANGUAGES[config.language].target(line, vocab)
                 target = [int(vocab[record["text"]]) for record in records]
                 if left < 0 or right > len(audio) or right - left < 400 or not target or coverage < config.ctc_coverage_threshold:
                     scores.append(None)

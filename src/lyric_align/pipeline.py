@@ -10,10 +10,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
+from .detection import detect_language
+from .languages import LANGUAGES
 from .config import AlignmentConfig, DEFAULT_ACTIVITY_PROJECTION_CONFIDENCE_THRESHOLD
 from .activity import estimate_voice_endings
 from .exceptions import InputValidationError, StageUnavailableError
-from .g2p import NON_SUNG, build_surface_spans, convert, is_japanese_char, romaji, split_mora
 from .io import sha256_file, validate_song_directory, write_json_atomic
 from .offset import estimate_offset
 from .schema import AlignmentArtifact, AlignmentLine, ArtifactPaths
@@ -30,7 +31,7 @@ def _config_signature(config: AlignmentConfig, stages: tuple[str, ...]) -> str:
 def _stage_signature(config: AlignmentConfig, stage: str) -> str:
     if stage == "reading":
         values = {
-            "g2p_backend": config.g2p_backend,
+            "g2p_backend": config.reading_backend,
             "enable_offset": config.enable_offset,
             "offset_low_ms": config.offset_low_ms,
             "offset_high_ms": config.offset_high_ms,
@@ -51,6 +52,8 @@ def _stage_signature(config: AlignmentConfig, stage: str) -> str:
         values = {"ctc_model_path": str(config.models.ctc_model_path) if config.models.ctc_model_path else None, "device": config.device, "sample_rate": config.sample_rate, "ctc_margin_ms": config.ctc_margin_ms, "ctc_activity_margin_ms": config.ctc_activity_margin_ms, "activity_confidence_threshold": config.activity_confidence_threshold, "activity_projection_confidence_threshold": config.activity_projection_confidence_threshold, "ctc_score_threshold": config.ctc_score_threshold, "ctc_coverage_threshold": config.ctc_coverage_threshold, "pipeline_version": config.pipeline_version}
     else:
         values = config.as_dict()
+    if config.language != "ja-en" and stage in {"reading", "ctc"}:
+        values["language"] = config.language
     payload = json.dumps(values, ensure_ascii=False, sort_keys=True).encode()
     return hashlib.sha256(payload).hexdigest()
 
@@ -116,8 +119,8 @@ def validate_song(song_dir: str | Path) -> dict[str, Any]:
     return {name: str(path) for name, path in files.items()}
 
 
-def _timed_mora(reading: str, start: int, end: int) -> list[dict[str, Any]]:
-    values = split_mora(reading)
+def _timed_mora(reading: str, start: int, end: int, language: str = "ja-en") -> list[dict[str, Any]]:
+    values = LANGUAGES[language].split_units(reading)
     if not values or end <= start:
         return []
     duration = end - start
@@ -160,7 +163,7 @@ def _reliable_activity_bounds(
 
 def _build_display_units(
     line: dict[str, Any], *, activity_projection_confidence_threshold: float = DEFAULT_ACTIVITY_PROJECTION_CONFIDENCE_THRESHOLD,
-    activity_confidence_threshold: float | None = None,
+    language: str = "ja-en", activity_confidence_threshold: float | None = None,
 ) -> list[dict[str, Any]]:
     """Build the renderer-facing per-character timing contract.
 
@@ -198,6 +201,7 @@ def _build_display_units(
     units: list[dict[str, Any]] = []
     previous_start = start
     nextfire = (line.get("ctc_window") or {}).get("profile") == "nextfire"
+    profile = LANGUAGES[language]
     order_repaired = False
     for index, char in enumerate(text):
         span = next(
@@ -237,7 +241,9 @@ def _build_display_units(
             if "source_surface_start" in item
             and int(item["source_surface_start"]) <= index < int(item["source_surface_end"])
         ]
-        if surface_matches:
+        if surface_matches or (profile.exact_surface_ranges and has_mora_source_map):
+            # Chinese CTC units always carry an exact glyph range. A missing
+            # English label must not inherit a neighbouring letter's timing.
             indices = surface_matches
         # A token with no reading (most punctuation) is intentionally absent
         # from the mora timeline.  Do not attach it to a proportional mora;
@@ -265,7 +271,7 @@ def _build_display_units(
         # allowed to fall behind the previous aligned onset here.  Keep the
         # monotonicity repair for actual mora mappings and metadata-free
         # legacy fallbacks only.
-        if a < previous_start and not nextfire and not (span and not indices):
+        if a < previous_start and not (nextfire or profile.exact_surface_ranges) and not (span and not indices):
             order_repaired = True
             # Prefer the character's sentence-relative position over a stale
             # CTC mora index. This gives an omitted final symbol a useful
@@ -285,18 +291,15 @@ def _build_display_units(
             if indices
             else (str(span.get("reading") or "") if not has_mora_source_map else "")
         )
-        # Keep pronunciation data only for Japanese surface characters.  G2P
-        # backends may transliterate Latin words into kana, but those words
-        # are not Japanese annotations and must remain blank in the artifact.
-        japanese_surface = is_japanese_char(char)
+        annotation, latin = profile.annotation(char, unit_reading, span)
         units.append({
             "text": char,
             "surface_index": index,
             "start_ms": a,
             "end_ms": max(a, b),
             "mora_indices": indices,
-            "reading": unit_reading if char.strip() and japanese_surface else "",
-            "romaji": romaji(unit_reading) if char.strip() and japanese_surface else "",
+            "reading": annotation,
+            "romaji": latin,
         })
         previous_start = a
     # Unmapped visible characters (punctuation and omitted-language fragments)
@@ -305,7 +308,7 @@ def _build_display_units(
     # across the complete sentence.  This keeps the CTC/mora boundaries intact
     # and makes the source of the timing explicit: alignment still owns all
     # lyric times; this is only a display-character projection.
-    unmapped_repaired = _fill_unmapped_display_unit_gaps(units, display_start, display_end, include_whitespace=nextfire)
+    unmapped_repaired = _fill_unmapped_display_unit_gaps(units, display_start, display_end, include_whitespace=nextfire or profile.exact_surface_ranges)
     overlap_repaired = _split_overlapping_display_units(units)
     # A mapped English fragment can overlap a neighbouring Japanese mora
     # after both local repairs. The renderer contract is strictly monotonic;
@@ -463,6 +466,7 @@ def _split_overlapping_display_units(units: list[dict[str, Any]]) -> bool:
 
 def _apply_timing_policy(
     lines: list[dict[str, Any]], *, activity_projection_confidence_threshold: float = DEFAULT_ACTIVITY_PROJECTION_CONFIDENCE_THRESHOLD,
+    language: str = "ja-en",
     activity_confidence_threshold: float | None = None,
 ) -> list[dict[str, Any]]:
     """Choose a trustworthy character-time source before writing the artifact."""
@@ -492,12 +496,12 @@ def _apply_timing_policy(
                 line["timing_source"] = "ctc"
             continue
         if activity_ok:
-            line["mora"] = _timed_mora(str(line.get("reading") or ""), bounded_start, bounded_end)
+            line["mora"] = _timed_mora(str(line.get("reading") or ""), bounded_start, bounded_end, language)
             line["timing_source"] = "activity_interpolation"
             if repaired and "CTC timing replaced by activity-bounded interpolation" not in warnings:
                 warnings.append("CTC timing replaced by activity-bounded interpolation")
         else:
-            line["mora"] = _timed_mora(str(line.get("reading") or ""), start, end)
+            line["mora"] = _timed_mora(str(line.get("reading") or ""), start, end, language)
             line["timing_source"] = "line_interpolation"
             if status == "fallback" and "activity endpoint unavailable; using line interpolation" not in warnings:
                 warnings.append("activity endpoint unavailable; using line interpolation")
@@ -509,26 +513,27 @@ def build_reading_lines(song_dir: Path, config: AlignmentConfig) -> list[Alignme
     validate_song(song_dir)
     files = validate_song_directory(song_dir)
     timeline = json.loads(files["timeline"].read_text(encoding="utf-8"))
+    profile = LANGUAGES[config.language]
     lines: list[AlignmentLine] = []
     for source_index, raw in enumerate(timeline):
         text = str(raw.get("text") or "").strip()
         start, end = int(raw.get("start_ms") or 0), int(raw.get("end_ms") or 0)
         if not text:
             continue
-        warnings: list[str] = []
-        if NON_SUNG.search(text):
+        if profile.filters(text):
             lines.append(AlignmentLine(source_index, text, start_ms=start, end_ms=end, status="non_sung", method="text_rule", warnings=["metadata-like line"]))
             continue
         try:
-            reading_data = convert(text, config.g2p_backend)
+            result = profile.read(text, config.reading_backend)
         except (ImportError, RuntimeError) as exc:
             raise StageUnavailableError(str(exc)) from exc
-        reading = reading_data.get("reading", "").replace(" ", "")
-        if not reading:
-            lines.append(AlignmentLine(source_index, text, start_ms=start, end_ms=end, status="unresolved", method=config.g2p_backend, warnings=["empty reading"]))
-            continue
-        mora = _timed_mora(reading, start, end)
-        lines.append(AlignmentLine(source_index, text, reading=reading, romaji=romaji(reading), start_ms=start, end_ms=end, status="interpolation", method=config.g2p_backend, confidence=None, mora=mora, surface_spans=build_surface_spans(text, reading, reading_data.get("tokens")), warnings=warnings))
+        if not result.text:
+            result.warnings.append("empty reading")
+        lines.append(AlignmentLine(
+            source_index, text, reading=result.text, romaji=result.latin, start_ms=start, end_ms=end,
+            status="interpolation" if result.text else "unresolved", method=config.reading_backend,
+            mora=_timed_mora(result.text, start, end, config.language), surface_spans=result.spans, warnings=result.warnings,
+        ))
     return lines
 
 
@@ -551,6 +556,12 @@ def prepare_song(
         raise StageUnavailableError("offset acoustic verification requires a local CTC model directory")
     song_dir = Path(song_dir)
     files = validate_song_directory(song_dir)
+    requested_config = config
+    detection = None
+    if config.language == "auto":
+        decision = detect_language(song_dir)
+        detection = decision.as_dict()
+        config = replace(config, language=decision.language)
     destination = Path(output_path) if output_path is not None else song_dir / "alignment.json"
     cached = _load_artifact(destination)
     preprocessing = _load_preprocessing(song_dir / "preprocessing.json")
@@ -569,12 +580,21 @@ def prepare_song(
         and cached and cached.stages.get("reading", {}).get("offset_audio_source") != "vocals"
     )
     if source_matches and offset_source_matches and all(
-        _stage_done(cached, name, _stage_signature(config, name)) for name in requested
+        _stage_done(cached, name, _stage_signature(config, name)) for name in requested | {"reading"}
     ):
         # A request for a lightweight subset must not discard completed heavy
         # stages.  If every requested stage is already valid, the whole
         # artifact is already the best result available and can be returned.
         if cached is not None:
+            reading_state = cached.stages["reading"]
+            if reading_state.get("detection") != detection:
+                reading_state["language"] = config.language
+                if detection is None:
+                    reading_state.pop("detection", None)
+                else:
+                    reading_state["detection"] = detection
+                cached.inputs["config_sha256"] = _config_signature(requested_config, stages)
+                _save_artifact(cached, destination, song_dir, requested_config)
             return cached
     if progress:
         progress("reading", 0.0, "building lyric readings")
@@ -584,7 +604,13 @@ def prepare_song(
         and cached is not None
         and _stage_done(cached, "reading", _stage_signature(config, "reading"))
     )
-    if reading_reusable and cached is not None:
+    # A previous CTC run replaced baseline timings and may have left tokens,
+    # status and repair warnings. Rebuild its readings before retrying CTC;
+    # the cached whole-song offset still applies to these fresh intervals.
+    reuse_lines = reading_reusable and not (
+        "ctc" in requested and cached and cached.stages.get("ctc", {}).get("status") in {"done", "error"}
+    )
+    if reuse_lines and cached is not None:
         line_values = [line.__dict__.copy() for line in cached.lines]
     else:
         lines = build_reading_lines(song_dir, config)
@@ -595,11 +621,15 @@ def prepare_song(
         "reading": (
             dict(cached.stages.get("reading") or {})
             if reading_reusable and cached is not None
-            else {"status": "done", "backend": config.g2p_backend, "signature": reading_signature}
+            else {"status": "done", "backend": config.reading_backend, "language": config.language, "signature": reading_signature}
         ),
         "demucs": {"status": "not_run"},
         "ctc": {"status": "not_run"},
     }
+    if detection is None:
+        stage_state["reading"].pop("detection", None)
+    else:
+        stage_state["reading"].update(language=config.language, detection=detection)
     demucs_signature = _stage_signature(config, "demucs")
     # Preserve completed stages that are not being requested.  Their model
     # signatures describe the configuration that produced them; a later
@@ -659,7 +689,7 @@ def prepare_song(
             demucs_config = replace(config, keep_vocals=True) if need_vocal and not config.keep_vocals else config
             stem_paths = separate_stems(files["audio"], song_dir, demucs_config, lambda fraction, message: progress("demucs", fraction, message) if progress else None)
             stage_state["demucs"] = {"status": "done", "model": config.demucs_model_name, "artifacts": stem_paths, "signature": demucs_signature}
-            write_json_atomic(song_dir / "preprocessing.json", {"status": "demucs_ready", "demucs": stage_state["demucs"], "artifacts": stem_paths, "config": config.as_dict()})
+            write_json_atomic(song_dir / "preprocessing.json", {"status": "demucs_ready", "demucs": stage_state["demucs"], "artifacts": stem_paths, "config": requested_config.as_dict()})
     elif "ctc" in stages or config.offset_acoustic_verify:
         # Permit a two-step workflow: callers may run Demucs once with
         # ``keep_vocals=True`` and invoke CTC later.  Reuse the persisted stem
@@ -722,7 +752,7 @@ def prepare_song(
             line["original_start_ms"] = int(line["start_ms"])
         if line.get("original_end_ms") is None:
             line["original_end_ms"] = int(line["end_ms"])
-    if global_offset and not reading_reusable:
+    if global_offset and not reuse_lines:
         for line in line_values:
             line["start_ms"] = max(0, int(line["start_ms"]) + global_offset)
             line["end_ms"] = max(line["start_ms"], int(line["end_ms"]) + global_offset)
@@ -773,12 +803,12 @@ def prepare_song(
     # boundary may still guide interpolation and display placement after CTC
     # has declined to use it for acoustic search.
     line_values = _apply_timing_policy(
-        line_values,
+        line_values, language=config.language,
         activity_projection_confidence_threshold=config.activity_projection_confidence_threshold,
     )
     for line in line_values:
         line["display_units"] = _build_display_units(
-            line,
+            line, language=config.language,
             activity_projection_confidence_threshold=config.activity_projection_confidence_threshold,
         )
     # The vocal stem is intentionally temporary in the default model flow.
@@ -809,7 +839,7 @@ def prepare_song(
         # Paths in a portable artifact are relative names, never the caller's
         # absolute filesystem paths.  Hashes still make cache invalidation
         # deterministic across machines.
-        inputs={"audio": {"path": files["audio"].name, "sha256": audio_hash}, "lyrics_timeline": {"path": files["timeline"].name, "sha256": timeline_hash}, "config_sha256": _config_signature(config, stages)},
+        inputs={"audio": {"path": files["audio"].name, "sha256": audio_hash}, "lyrics_timeline": {"path": files["timeline"].name, "sha256": timeline_hash}, "config_sha256": _config_signature(requested_config, stages)},
         timing={"global_offset_ms": global_offset, "offset_status": offset.get("status", "unknown"), "diagnostics": offset},
         lines=final_lines,
         stages=stage_state,
@@ -819,7 +849,15 @@ def prepare_song(
         # the corresponding stems atomically.
         artifacts=ArtifactPaths(vocals=stem_paths.get("vocals"), instrumental=stem_paths.get("instrumental")),
     )
+    _save_artifact(artifact, destination, song_dir, requested_config)
+    if progress:
+        progress("reading", 1.0, "alignment baseline written")
+    return artifact
+
+
+def _save_artifact(artifact: AlignmentArtifact, destination: Path, song_dir: Path, config: AlignmentConfig) -> None:
     artifact.validate()
+    stage_state = artifact.stages
     write_json_atomic(destination, artifact.to_dict())
     completed = stage_state["ctc"].get("status") == "done"
     prep_status = "ready" if completed else ("demucs_ready" if stage_state["demucs"].get("status") == "done" else "reading_ready")
@@ -842,6 +880,3 @@ def prepare_song(
             "config": config.as_dict(),
         },
     )
-    if progress:
-        progress("reading", 1.0, "alignment baseline written")
-    return artifact

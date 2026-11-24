@@ -40,7 +40,7 @@ not need to modify internal modules. The main controls are:
 
 | Area | Parameters |
 | --- | --- |
-| text | `g2p_backend` (`sudachi` by default) |
+| text | `g2p_backend` (`sudachi` by default for `language="ja-en"`), `language` (`ja-en`, `zh`, `cant`, `auto`) |
 | execution | `device`, `ffmpeg_path`, `sample_rate` |
 | Demucs/output | `demucs_model_name`, `keep_vocals`, `keep_instrumental`, `vocals_format`, `instrumental_format`, `vocals_bitrate`, `instrumental_bitrate` |
 | offset | `enable_offset`, `offset_low_ms`, `offset_high_ms`, `offset_step_ms` |
@@ -169,9 +169,35 @@ prevents a renderer from having to infer ordering.
 When reliable vocal activity bounds are available, an unanchored trailing run
 is bounded by `singing_end_ms`, so trailing punctuation cannot occupy the
 post-vocal tail of the source lyric interval.
-Pronunciation fields are populated only for Japanese surface characters;
-Latin words and other scripts remain present in `text` but have empty
-`reading`/`romaji`, even when a G2P backend happens to transliterate them.
+With `language="zh"` or `"cant"`, the reading stage records its language
+and backend in `stages.reading`. The CLI and Python configuration accept
+`cmn` and `yue` as aliases and serialize new results with `zh` and `cant`.
+Existing schema 1 artifacts remain readable. Preparing an older Chinese
+artifact with the renamed language refreshes its reading and CTC signatures. The line's `reading` and legacy `romaji`
+contain space-separated Han syllables and English words. Chinese
+`surface_spans[].ctc_text` holds the acoustic spelling for that span. A
+question mark marks an unknown sung character in target diagnostics and
+reduces coverage. Spaces and ordinary punctuation have an empty target.
+The Chinese paths store toneless pinyin or Jyutping in both pronunciation
+fields of each supported Han display unit. The Japanese path keeps its
+existing kana and romaji annotations. English display units carry timings
+and empty pronunciation fields on all paths. The `mora` key holds timed
+reading units (Han syllables and, after CTC, individual English letters).
+Switching language invalidates reading and CTC results. The Demucs signature
+depends only on separation settings.
+
+`detect_language(song_dir)` reads the timeline and optional NetEase romanization
+track and returns a `LanguageDecision`. Its `language` is a canonical route for every valid timeline, including an empty one.
+Script-level uncertainty falls back to `ja-en`. Within the Chinese branch, compare the two exact match counts on the same romanized syllables. Any lead selects that route with `reason="romanization"`. Ties, including zero comparable syllables, use Cantonese writing cues, then the Mandarin default.
+The decision fields, including `evidence` counts and detector `version`, are serializable
+with `as_dict()`. With `AlignmentConfig(language="auto")`, preparation resolves
+the route before reading or stem processing. The decision is recorded
+in `stages.reading.detection`, alongside the effective `stages.reading.language`.
+The preprocessing journal retains the requested `config.language`. Each auto
+invocation examines current lyrics and pronunciation before checking caches.
+If only the decision evidence or selection mode changes, matching stage
+results can serve the request with refreshed diagnostics.
+
 When activity detection is confident, `singing_start_ms` and
 `singing_end_ms` bound the CTC search window; otherwise CTC records
 `ctc_window.source="line_bounds"` and uses the sentence interval.

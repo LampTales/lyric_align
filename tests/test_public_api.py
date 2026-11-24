@@ -3,6 +3,7 @@ from pathlib import Path
 
 from lyric_align import AlignmentConfig, AlignmentArtifact, ModelPaths, load_alignment, prepare_song, validate_song
 from lyric_align.exceptions import InputValidationError
+from lyric_align import g2p
 from lyric_align.g2p import build_surface_spans, convert
 from lyric_align.pipeline import _apply_timing_policy, _build_display_units
 from lyric_align.stages import _repair_token_spans
@@ -51,16 +52,16 @@ class PublicApiTests(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
             song = make_song(Path(directory))
-            original = pipeline.convert
+            original = g2p.convert
             calls = []
-            pipeline.convert = lambda text, backend: (calls.append(text) or {"reading": "なつです", "backend": backend})
+            g2p.convert = lambda text, backend: (calls.append(text) or {"reading": "なつです", "backend": backend})
             try:
                 files = validate_song(song)
                 self.assertTrue(files["audio"].endswith("audio.mp3"))
                 config = AlignmentConfig(models=ModelPaths(ctc_model_path="/models/ctc", demucs_model_path="/models/demucs"))
                 artifact = prepare_song(song, config=config)
             finally:
-                pipeline.convert = original
+                g2p.convert = original
             self.assertTrue((song / "alignment.json").exists())
             self.assertTrue(artifact.lines[0].mora)
             self.assertIsNotNone(artifact.lines[0].original_start_ms)
@@ -91,12 +92,12 @@ class PublicApiTests(unittest.TestCase):
             (song / "lyrics_timeline.json").write_text(json.dumps([
                 {"text": "夏です", "start_ms": 100, "end_ms": 100},
             ], ensure_ascii=False), encoding="utf-8")
-            original = pipeline.convert
-            pipeline.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
+            original = g2p.convert
+            g2p.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
             try:
                 artifact = prepare_song(song, config=AlignmentConfig(enable_offset=False))
             finally:
-                pipeline.convert = original
+                g2p.convert = original
             self.assertEqual(artifact.lines[0].mora, [])
 
     def test_load_alignment_returns_none_for_missing_or_invalid_file(self):
@@ -140,14 +141,14 @@ class PublicApiTests(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
             song = make_song(Path(directory))
-            original = pipeline.convert
+            original = g2p.convert
             calls = []
-            pipeline.convert = lambda text, backend: (calls.append(text) or {"reading": "なつです", "backend": backend})
+            g2p.convert = lambda text, backend: (calls.append(text) or {"reading": "なつです", "backend": backend})
             try:
                 first = prepare_song(song, config=AlignmentConfig(enable_offset=False))
                 second = prepare_song(song, config=AlignmentConfig(enable_offset=False))
             finally:
-                pipeline.convert = original
+                g2p.convert = original
             self.assertEqual(len(calls), 1)
             self.assertEqual(first.to_dict(), second.to_dict())
 
@@ -157,9 +158,9 @@ class PublicApiTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             song = make_song(Path(directory))
-            original = pipeline.convert
+            original = g2p.convert
             calls = []
-            pipeline.convert = lambda text, backend: (calls.append(text) or {"reading": "なつです", "backend": backend})
+            g2p.convert = lambda text, backend: (calls.append(text) or {"reading": "なつです", "backend": backend})
             try:
                 first = prepare_song(song, config=AlignmentConfig(enable_offset=False))
                 instrumental = song / "stems" / "instrumental.mp3"
@@ -175,7 +176,7 @@ class PublicApiTests(unittest.TestCase):
                 (song / "alignment.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
                 rerun = prepare_song(song, config=AlignmentConfig(enable_offset=False), stages=("reading",))
             finally:
-                pipeline.convert = original
+                g2p.convert = original
 
             self.assertEqual(len(rerun.lines), len(first.lines))
             self.assertEqual(rerun.artifacts.instrumental, "stems/instrumental.mp3")
@@ -188,8 +189,8 @@ class PublicApiTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             song = make_song(Path(directory))
-            original = pipeline.convert
-            pipeline.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
+            original = g2p.convert
+            g2p.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
             try:
                 first = prepare_song(song, config=AlignmentConfig(enable_offset=False))
                 payload = first.to_dict()
@@ -207,7 +208,7 @@ class PublicApiTests(unittest.TestCase):
                     stages=("reading",),
                 )
             finally:
-                pipeline.convert = original
+                g2p.convert = original
 
             self.assertEqual(rerun.stages["demucs"]["status"], "done")
 
@@ -220,8 +221,8 @@ class PublicApiTests(unittest.TestCase):
             stems = song / "stems"
             stems.mkdir()
             (stems / "instrumental.mp3").write_bytes(b"instrumental")
-            original = pipeline.convert
-            pipeline.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
+            original = g2p.convert
+            g2p.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
             try:
                 first = prepare_song(song, config=AlignmentConfig(enable_offset=False))
                 payload = first.to_dict()
@@ -247,7 +248,7 @@ class PublicApiTests(unittest.TestCase):
                     stages=("reading",),
                 )
             finally:
-                pipeline.convert = original
+                g2p.convert = original
 
             self.assertIsNone(rerun.artifacts.vocals)
             self.assertIsNone(rerun.stages["demucs"]["artifacts"]["vocals"])
@@ -259,8 +260,8 @@ class PublicApiTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             song = make_song(Path(directory))
-            original_convert, original_align = pipeline.convert, pipeline.align_ctc
-            pipeline.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
+            original_convert, original_align = g2p.convert, pipeline.align_ctc
+            g2p.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
             pipeline.align_ctc = lambda vocal, lines, config, progress=None: [
                 dict(line, alignment_status="ctc") for line in lines
             ]
@@ -297,7 +298,7 @@ class PublicApiTests(unittest.TestCase):
                     ),
                 )
             finally:
-                pipeline.convert, pipeline.align_ctc = original_convert, original_align
+                g2p.convert, pipeline.align_ctc = original_convert, original_align
 
             self.assertEqual(rerun.lines[0].start_ms, 200)
 
@@ -343,12 +344,12 @@ class PublicApiTests(unittest.TestCase):
         import lyric_align.pipeline as pipeline
         with tempfile.TemporaryDirectory() as directory:
             song = make_song(Path(directory))
-            original = pipeline.convert
-            pipeline.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
+            original = g2p.convert
+            g2p.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
             try:
                 artifact = prepare_song(song, config=AlignmentConfig(enable_offset=False))
             finally:
-                pipeline.convert = original
+                g2p.convert = original
             line = artifact.lines[0]
             self.assertEqual("".join(item["text"] for item in line.display_units), line.text)
             self.assertTrue(all(line.start_ms <= item["start_ms"] <= item["end_ms"] <= line.end_ms for item in line.display_units))
@@ -590,8 +591,8 @@ class PublicApiTests(unittest.TestCase):
             stem.parent.mkdir()
             stem.write_bytes(b"vocal")
             (song / "preprocessing.json").write_text(json.dumps({"demucs": {"artifacts": {"vocals": "stems/vocals.mp3"}}}), encoding="utf-8")
-            original_convert, original_align = pipeline.convert, pipeline.align_ctc
-            pipeline.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
+            original_convert, original_align = g2p.convert, pipeline.align_ctc
+            g2p.convert = lambda text, backend: {"reading": "なつです", "backend": backend}
             pipeline.align_ctc = lambda vocal, lines, config, progress=None: [dict(line, alignment_status="ctc", mora=line.get("mora", [])) for line in lines]
             try:
                 artifact = prepare_song(
@@ -600,6 +601,6 @@ class PublicApiTests(unittest.TestCase):
                     config=AlignmentConfig(enable_offset=False, keep_vocals=True, models=ModelPaths(ctc_model_path="/models/ctc")),
                 )
             finally:
-                pipeline.convert, pipeline.align_ctc = original_convert, original_align
+                g2p.convert, pipeline.align_ctc = original_convert, original_align
             self.assertEqual(artifact.stages["ctc"]["status"], "done")
             self.assertTrue(stem.exists())

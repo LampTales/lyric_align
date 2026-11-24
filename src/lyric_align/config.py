@@ -6,9 +6,18 @@ from dataclasses import dataclass, field
 import math
 from pathlib import Path
 
+from .languages import LANGUAGES
+
 
 DEFAULT_CTC_ACTIVITY_CONFIDENCE_THRESHOLD = 0.45
 DEFAULT_ACTIVITY_PROJECTION_CONFIDENCE_THRESHOLD = 0.35
+
+SUPPORTED_LANGUAGES = (*LANGUAGES, "auto")
+_LANGUAGE_ALIASES = {"cmn": "zh", "yue": "cant"}
+
+
+def canonical_language(language: str) -> str:
+    return _LANGUAGE_ALIASES.get(language, language)
 
 
 @dataclass(frozen=True)
@@ -88,7 +97,20 @@ class AlignmentConfig:
     # invalidate cached alignments. It is not the Python package version.
     pipeline_version: str = "0.14"
 
+    # Explicit song-wide reading path. All paths share the NextFire model.
+    language: str = "ja-en"
+
+    @property
+    def reading_backend(self) -> str:
+        if self.language == "auto":
+            return "auto"
+        return LANGUAGES[self.language].backend or self.g2p_backend
+
     def __post_init__(self) -> None:
+        language = canonical_language(self.language)
+        if language not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"language must be one of {', '.join(SUPPORTED_LANGUAGES)}")
+        object.__setattr__(self, "language", language)
         if self.g2p_backend not in {"openjtalk", "sudachi", "pykakasi"}:
             raise ValueError("g2p_backend must be openjtalk, sudachi, or pykakasi")
         if self.sample_rate <= 0:
@@ -123,6 +145,7 @@ class AlignmentConfig:
 
     def as_dict(self) -> dict:
         return {
+            "language": self.language,
             "g2p_backend": self.g2p_backend,
             "device": self.device,
             "ffmpeg_path": self.ffmpeg_path,

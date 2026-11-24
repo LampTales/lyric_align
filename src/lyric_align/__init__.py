@@ -6,6 +6,7 @@ dictionary; no model is downloaded or bundled by this package.
 """
 
 from .config import AlignmentConfig, ModelPaths
+from .detection import LanguageDecision, detect_language
 from .exceptions import InputValidationError, LyricAlignError, StageUnavailableError
 from .pipeline import load_alignment, prepare_song, validate_song
 from .schema import AlignmentArtifact, AlignmentLine, ArtifactPaths
@@ -17,6 +18,8 @@ __all__ = [
     "AlignmentArtifact",
     "AlignmentLine",
     "ArtifactPaths",
+    "LanguageDecision",
+    "detect_language",
     "prepare_song",
     "load_alignment",
     "clear_model_cache",

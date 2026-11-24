@@ -25,6 +25,8 @@ dependencies = [
   "numpy>=1.24,<3",
   "sudachipy>=0.6,<1",
   "sudachidict-core",
+  "pypinyin>=0.55,<0.56",
+  "ToJyutping>=3.2,<4",
 ]
 
 [project.optional-dependencies]

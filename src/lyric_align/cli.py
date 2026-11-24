@@ -11,7 +11,11 @@ from .config import (
     DEFAULT_ACTIVITY_PROJECTION_CONFIDENCE_THRESHOLD,
     DEFAULT_CTC_ACTIVITY_CONFIDENCE_THRESHOLD,
     ModelPaths,
+    SUPPORTED_LANGUAGES,
+    canonical_language,
 )
+from .detection import detect_language
+from .exceptions import InputValidationError
 from .pipeline import prepare_song, validate_song
 
 
@@ -20,9 +24,13 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     check = sub.add_parser("validate", help="validate a song directory")
     check.add_argument("--song-dir", type=Path, required=True)
+    detect = sub.add_parser("detect", help="inspect the lyric language route (read-only)")
+    detect.add_argument("--song-dir", type=Path, required=True)
     prepare = sub.add_parser("prepare", help="build alignment.json")
     prepare.add_argument("--song-dir", type=Path, required=True)
     prepare.add_argument("--output", type=Path)
+    prepare.add_argument("--language", type=canonical_language, choices=SUPPORTED_LANGUAGES, default="ja-en",
+                         help="lyric reading path: Japanese/English, Mandarin, or Cantonese, or auto")
     prepare.add_argument("--g2p-backend", choices=("openjtalk", "sudachi", "pykakasi"), default="sudachi")
     prepare.add_argument("--demucs-model-path", type=Path)
     prepare.add_argument("--demucs-model-name", default="htdemucs")
@@ -55,10 +63,14 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--offset-acoustic-min-margin", type=float, default=0.15)
     prepare.add_argument("--stages", nargs="+", choices=("reading", "demucs", "ctc"), default=["reading"], help="stages to run; demucs and ctc require their separate model paths")
     args = parser.parse_args(argv)
+    if args.command == "detect":
+        print(json.dumps(detect_language(args.song_dir).as_dict(), ensure_ascii=False, indent=2))
+        return 0
     if args.command == "validate":
         print(json.dumps(validate_song(args.song_dir), ensure_ascii=False, indent=2))
         return 0
     config = AlignmentConfig(
+        language=args.language,
         g2p_backend=args.g2p_backend,
         device=args.device,
         ffmpeg_path=args.ffmpeg_path,
@@ -90,7 +102,10 @@ def main(argv: list[str] | None = None) -> int:
             ctc_model_path=args.ctc_model_path,
         ),
     )
-    artifact = prepare_song(args.song_dir, output_path=args.output, config=config, stages=tuple(args.stages), progress=lambda stage, fraction, message: print(f"[{stage}] {fraction:.0%} {message}"))
+    try:
+        artifact = prepare_song(args.song_dir, output_path=args.output, config=config, stages=tuple(args.stages), progress=lambda stage, fraction, message: print(f"[{stage}] {fraction:.0%} {message}"))
+    except InputValidationError as exc:
+        parser.error(str(exc))
     print(json.dumps({"schema_version": artifact.schema_version, "lines": len(artifact.lines), "output": str(args.output or args.song_dir / "alignment.json")}, ensure_ascii=False, indent=2))
     return 0
 

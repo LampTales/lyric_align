@@ -2,8 +2,8 @@
 
 `lyric-align` is an embeddable Python library and CLI for turning a song-level
 lyric timeline into a versioned `alignment.json` suitable for karaoke
-rendering. It provides Japanese reading generation, optional Demucs source
-separation, and optional CTC forced alignment.
+rendering. It prepares Japanese, Mandarin and Cantonese readings, handles English lyric
+fragments, and supports optional Demucs separation and CTC forced alignment.
 
 The library owns lyric timing and pronunciation preprocessing. A renderer is
 expected to consume the resulting artifact without loading acoustic models or
@@ -24,7 +24,7 @@ received the same end-to-end validation.
 ## Installation
 
 Python 3.10 or newer and FFmpeg are required. A normal install includes NumPy,
-SudachiPy, and `sudachidict-core`, so the supported default reading stage works
+SudachiPy, `sudachidict-core`, pypinyin and ToJyutping, so the supported default reading stage works
 without selecting an extra:
 
 ```bash
@@ -99,18 +99,17 @@ lyric-align prepare \
   --ctc-model-path /models/huggingface/hub/models--NextFire--mms-300m-ForcedAligner-karaoke-ja-Latn/snapshots/2ab2b5f46539ee284703c281f286b01d2410ee12
 ```
 
-The CTC stage uses the downloaded NextFire karaoke checkpoint and its Latin target conversion:
+Select the song language with `--language zh` (Mandarin) or `--language cant`
+(Cantonese), or set `AlignmentConfig(language="zh")` in Python. Older callers can still
+pass `cmn` and `yue` as aliases. The default `ja-en` uses the existing Japanese/English path. All three use the same
+NextFire checkpoint and produce schema 1 display units. English words retain
+their spelling when mixed with either Chinese reading.
 
-```bash
-lyric-align prepare --song-dir /data/song --stages reading demucs ctc \
-  --demucs-model-path /models/demucs/htdemucs \
-  --ctc-model-path /models/huggingface/hub/models--NextFire--mms-300m-ForcedAligner-karaoke-ja-Latn/snapshots/2ab2b5f46539ee284703c281f286b01d2410ee12
-```
-
-This retains the displayed lyric text and Japanese reading metadata, while
-building a Latin alignment target. English words retain their surface spelling
-in this baseline; inspect `ctc_window` and `warnings` before accepting a low
-confidence result.
+Preview automatic routing with `lyric-align detect --song-dir /data/song`.
+Use `--language auto` on the prepare command to apply the decision. The
+preview reports the reason, including a Mandarin default for ambiguous Han
+lyrics. Once Han lyrics enter the Chinese branch, auto chooses between `zh` and `cant` even with weak pronunciation evidence. Unresolved script-level decisions use `ja-en`.
+See [language detection and corpus results](docs/LANGUAGE_DETECTION.md).
 
 CTC checkpoints are opened with Transformers' `local_files_only=True`.
 Hugging Face Demucs snapshots are also resolved with offline mode enabled, so
