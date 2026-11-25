@@ -22,6 +22,40 @@ def make_song(tmp_path: Path) -> Path:
     return song
 
 
+def test_interrupted_repair_keeps_ctc_and_retries_once_from_source(tmp_path, monkeypatch):
+    from lyric_align import pipeline
+    from lyric_align.stages import BoundaryRepairInterrupted
+
+    song = make_song(tmp_path)
+    vocal = song / "stems" / "vocals.mp3"
+    vocal.parent.mkdir()
+    vocal.touch()
+    config = AlignmentConfig(enable_offset=False, keep_vocals=True)
+    monkeypatch.setattr(pipeline, "estimate_voice_endings", lambda path, lines, **kw: lines)
+    calls = []
+
+    def align(path, lines, config, progress=None):
+        calls.append(lines[0]["end_ms"])
+        line = dict(lines[0], end_ms=1250, alignment_status="ctc", timing_source="ctc")
+        aligned = [line, *lines[1:]]
+        if len(calls) == 1:
+            raise BoundaryRepairInterrupted(aligned, "device failure")
+        return aligned
+
+    monkeypatch.setattr(pipeline, "align_ctc", align)
+    partial = prepare_song(song, config=config, stages=("ctc",))
+    state = partial.stages["ctc"]
+    assert state["status"] == "partial" and state["boundary_repair_error"] == "device failure"
+    assert partial.lines[0].end_ms == 1250 and partial.lines[0].status == "ctc"
+    assert load_alignment(song / "alignment.json").to_dict() == partial.to_dict()
+    assert prepare_song(song, config=config).to_dict() == partial.to_dict()
+    recovered = prepare_song(song, config=config, stages=("ctc",))
+    assert recovered.stages["ctc"]["status"] == "done"
+    assert "boundary_repair_error" not in recovered.stages["ctc"]
+    assert prepare_song(song, config=config, stages=("ctc",)).to_dict() == recovered.to_dict()
+    assert calls == [1100, 1100]
+
+
 class PublicApiTests(unittest.TestCase):
     def test_default_reading_backend_is_sudachi(self):
         self.assertEqual(AlignmentConfig().g2p_backend, "sudachi")

@@ -18,7 +18,7 @@ from .exceptions import InputValidationError, StageUnavailableError
 from .io import sha256_file, validate_song_directory, write_json_atomic
 from .offset import estimate_offset
 from .schema import AlignmentArtifact, AlignmentLine, ArtifactPaths
-from .stages import align_ctc, separate_stems
+from .stages import BoundaryRepairInterrupted, align_ctc, separate_stems
 
 ProgressCallback = Callable[[str, float, str], None]
 
@@ -49,7 +49,7 @@ def _stage_signature(config: AlignmentConfig, stage: str) -> str:
     elif stage == "demucs":
         values = {"demucs_model_name": config.demucs_model_name, "demucs_model_path": str(config.models.demucs_model_path) if config.models.demucs_model_path else None, "device": config.device, "keep_vocals": config.keep_vocals, "keep_instrumental": config.keep_instrumental, "vocals_format": config.vocals_format, "instrumental_format": config.instrumental_format, "vocals_bitrate": config.vocals_bitrate, "instrumental_bitrate": config.instrumental_bitrate}
     elif stage == "ctc":
-        values = {"ctc_model_path": str(config.models.ctc_model_path) if config.models.ctc_model_path else None, "device": config.device, "sample_rate": config.sample_rate, "ctc_margin_ms": config.ctc_margin_ms, "ctc_activity_margin_ms": config.ctc_activity_margin_ms, "activity_confidence_threshold": config.activity_confidence_threshold, "activity_projection_confidence_threshold": config.activity_projection_confidence_threshold, "ctc_score_threshold": config.ctc_score_threshold, "ctc_coverage_threshold": config.ctc_coverage_threshold, "pipeline_version": config.pipeline_version}
+        values = {"boundary_repair_version": 3, "ctc_model_path": str(config.models.ctc_model_path) if config.models.ctc_model_path else None, "device": config.device, "sample_rate": config.sample_rate, "ctc_margin_ms": config.ctc_margin_ms, "ctc_activity_margin_ms": config.ctc_activity_margin_ms, "activity_confidence_threshold": config.activity_confidence_threshold, "activity_projection_confidence_threshold": config.activity_projection_confidence_threshold, "ctc_score_threshold": config.ctc_score_threshold, "ctc_coverage_threshold": config.ctc_coverage_threshold, "pipeline_version": config.pipeline_version}
     else:
         values = config.as_dict()
     if config.language != "ja-en" and stage in {"reading", "ctc"}:
@@ -608,7 +608,7 @@ def prepare_song(
     # status and repair warnings. Rebuild its readings before retrying CTC;
     # the cached whole-song offset still applies to these fresh intervals.
     reuse_lines = reading_reusable and not (
-        "ctc" in requested and cached and cached.stages.get("ctc", {}).get("status") in {"done", "error"}
+        "ctc" in requested and cached and cached.stages.get("ctc", {}).get("status") in {"done", "partial", "error"}
     )
     if reuse_lines and cached is not None:
         line_values = [line.__dict__.copy() for line in cached.lines]
@@ -644,7 +644,7 @@ def prepare_song(
         elif _stage_done(cached, "demucs", demucs_signature):
             stage_state["demucs"] = dict(cached_demucs)
         cached_ctc = cached.stages.get("ctc") or {}
-        if reading_reusable and "ctc" not in stages and cached_ctc.get("status") in {"done", "error"}:
+        if reading_reusable and "ctc" not in stages and cached_ctc.get("status") in {"done", "partial", "error"}:
             stage_state["ctc"] = dict(cached_ctc)
         elif reading_reusable and _stage_done(cached, "ctc", _stage_signature(config, "ctc")):
             stage_state["ctc"] = dict(cached_ctc)
@@ -763,7 +763,7 @@ def prepare_song(
         vocal = stem_paths.get("vocals")
         if not vocal:
             raise StageUnavailableError("ctc stage requires a Demucs vocals output")
-        stage_state["ctc"] = {"status": "running", "model": str(config.models.ctc_model_path)}
+        stage_state["ctc"] = {"status": "running", "model": str(config.models.ctc_model_path), "signature": _stage_signature(config, "ctc")}
         try:
             if progress:
                 progress("activity", 0.0, "detecting vocal end points")
@@ -779,14 +779,16 @@ def prepare_song(
                 # usable when a stem cannot be decoded for this diagnostic.
                 pass
             try:
-                ctc_lines = align_ctc(song_dir / vocal, line_values, config, lambda fraction, message: progress("ctc", fraction, message) if progress else None)
-                line_values = ctc_lines
-                stage_state["ctc"] = {"status": "done", "model": str(config.models.ctc_model_path), "signature": _stage_signature(config, "ctc")}
+                line_values = align_ctc(song_dir / vocal, line_values, config, lambda fraction, message: progress("ctc", fraction, message) if progress else None)
+                stage_state["ctc"]["status"] = "done"
+            except BoundaryRepairInterrupted as exc:
+                line_values = exc.lines
+                stage_state["ctc"].update(status="partial", boundary_repair_error=str(exc))
             except Exception as exc:
                 # Keep a usable activity-bounded artifact when CTC itself is
                 # unavailable or fails globally.  The stage record preserves
                 # the diagnostic while rendering can continue with G2P+mora.
-                stage_state["ctc"] = {"status": "error", "model": str(config.models.ctc_model_path), "error": str(exc), "signature": _stage_signature(config, "ctc")}
+                stage_state["ctc"].update(status="error", error=str(exc))
         finally:
             if not config.keep_vocals:
                 try:

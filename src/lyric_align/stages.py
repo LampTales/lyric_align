@@ -8,11 +8,14 @@ path from ``AlignmentConfig.models``.
 from __future__ import annotations
 
 import subprocess
+import logging
 import os
 import threading
 from pathlib import Path
 from typing import Any, Callable
 
+from .sections import repair_sections
+from .boundaries import repair_boundaries
 from .config import AlignmentConfig
 from .languages import LANGUAGES
 from .ctc_text import group_ctc_tokens, is_singable_target_char
@@ -406,6 +409,14 @@ def _forced_align(log_probs: Any, target: list[int], blank: int) -> tuple[list[t
     return spans, score
 
 
+class BoundaryRepairInterrupted(RuntimeError):
+    """Carry the last completed alignment pass through a repair failure."""
+
+    def __init__(self, lines: list[dict], message: str):
+        super().__init__(message)
+        self.lines = lines
+
+
 def align_ctc(
     vocal_path: Path,
     lines: list[dict[str, Any]],
@@ -430,6 +441,34 @@ def align_ctc(
     expected_rate = getattr(processor.feature_extractor, "sampling_rate", config.sample_rate)
     if config.sample_rate != expected_rate:
         raise StageUnavailableError(f"CTC model requires sample_rate={expected_rate}")
+
+    def infer(records: list[dict], left: int, right: int) -> tuple[list[dict], float]:
+        segment = audio[left:right]
+        target = [vocab[r["text"]] for r in records]
+        inputs = processor(segment, sampling_rate=config.sample_rate, return_tensors="pt")
+        logits = model(**{key: value.to(config.device) for key, value in inputs.items()}).logits[0]
+        log_probs = torch.log_softmax(logits, dim=-1)
+        spans, score = _forced_align(log_probs, target, blank)
+        ratio = (len(segment) * 1000 / config.sample_rate) / max(1, logits.shape[0])
+        tokens = []
+        for record, (a, b) in zip(records, spans):
+            char = record["text"]
+            raw_start = round(left * 1000 / config.sample_rate + a * ratio)
+            raw_end = round(left * 1000 / config.sample_rate + b * ratio)
+            confidence = log_probs[a:b, vocab[char]].mean().item() if b > a else -99.0
+            tokens.append({**record, "start_ms": raw_start, "end_ms": raw_end, "frame_confidence": round(float(confidence), 3)})
+        return tokens, score
+
+    def infer_boundary(records: list[dict], start_ms: int, end_ms: int) -> list[dict]:
+        left = max(0, start_ms * config.sample_rate // 1000)
+        right = min(len(audio), end_ms * config.sample_rate // 1000)
+        if right - left < 400:
+            return []
+        tokens, score = infer(records, left, right)
+        if score < config.ctc_score_threshold or not _all_singable_tokens_positive(tokens):
+            return []
+        return tokens
+
     output = []
     alignable = [line for line in lines if line.get("reading") and line.get("status") != "non_sung"]
     completed = 0
@@ -460,11 +499,8 @@ def align_ctc(
             search_margin = 0 if bounded else config.ctc_margin_ms
             left = max(0, int((window_start - search_margin) * config.sample_rate / 1000))
             right = min(len(audio), int((window_end + search_margin) * config.sample_rate / 1000))
-            segment = audio[left:right]
             char_records, coverage, target_text = LANGUAGES[config.language].target(line, vocab)
-            chars = [record["text"] for record in char_records]
-            target = [int(vocab[char]) for char in chars]
-            if len(segment) < 400 or not target:
+            if right - left < 400 or not char_records:
                 updated = dict(line, alignment_status="fallback", coverage=coverage, tokens=[], ctc_score=-1e9)
                 updated["ctc_window"] = {"start_ms": window_start, "end_ms": window_end, "source": window_source,
                                          "profile": "nextfire", "target": target_text}
@@ -472,20 +508,10 @@ def align_ctc(
                 output.append(updated)
                 completed += 1
                 continue
-            inputs = processor(segment, sampling_rate=config.sample_rate, return_tensors="pt")
-            logits = model(**{key: value.to(config.device) for key, value in inputs.items()}).logits[0]
-            log_probs = torch.log_softmax(logits, dim=-1)
-            spans, score = _forced_align(log_probs, target, blank)
-            ratio = (len(segment) * 1000 / config.sample_rate) / max(1, logits.shape[0])
-            tokens = []
-            for record, (a, b) in zip(char_records, spans):
-                char = record["text"]
-                raw_start = round(left * 1000 / config.sample_rate + a * ratio)
-                raw_end = round(left * 1000 / config.sample_rate + b * ratio)
-                token_start = max(start, min(end, raw_start))
-                token_end = max(token_start, min(end, raw_end))
-                confidence = log_probs[a:b, vocab[char]].mean().item() if b > a else -99.0
-                tokens.append({**record, "start_ms": token_start, "end_ms": token_end, "frame_confidence": round(float(confidence), 3)})
+            tokens, score = infer(char_records, left, right)
+            for token in tokens:
+                token["start_ms"] = max(start, min(end, token["start_ms"]))
+                token["end_ms"] = max(token["start_ms"], min(end, token["end_ms"]))
             raw_tokens = [dict(item) for item in tokens]
             tokens, locally_repaired = _repair_token_spans(tokens, window_start, window_end)
             updated = dict(line, warnings=list(line.get("warnings") or []))
@@ -546,7 +572,17 @@ def align_ctc(
             completed += 1
             if progress:
                 progress(completed / max(1, len(alignable)), f"aligned line {completed}/{len(alignable)}")
-    return output
+        if progress:
+            progress(1.0, "checking adjacent lyric boundaries")
+        try:
+            output = repair_boundaries(output, audio, config.sample_rate, infer_boundary)
+            return repair_sections(output, audio, config.sample_rate, infer_boundary)
+        except Exception as exc:
+            # Preserve the last complete pass for rendering. The pipeline
+            # records a partial stage so a later CTC request can retry.
+            message = f"{type(exc).__name__}: {exc}"
+            logging.getLogger(__name__).warning("Skipping CTC boundary repair: %s", message)
+            raise BoundaryRepairInterrupted(output, message) from exc
 
 
 def score_offset_candidates(
