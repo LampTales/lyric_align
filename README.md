@@ -101,9 +101,15 @@ lyric-align prepare \
 
 Select the song language with `--language zh` (Mandarin) or `--language cant`
 (Cantonese), or set `AlignmentConfig(language="zh")` in Python. Older callers can still
-pass `cmn` and `yue` as aliases. The default `ja-en` uses the existing Japanese/English path. All three use the same
-NextFire checkpoint and produce schema 1 display units. English words retain
-their spelling when mixed with either Chinese reading.
+pass `cmn` and `yue` as aliases. The default `ja-en` uses NextFire for Japanese/English. All paths produce schema 1 display units. English words retain
+their spelling when mixed with either Chinese reading. Mandarin and Cantonese use the local MMS_FA weight file and default score threshold `-2.25`. Supply `--mms-fa-model-path /models/torch/hub/checkpoints/model.pt` alongside the NextFire `--ctc-model-path` for automatic language selection. Python callers supply both paths through `ModelPaths`.
+
+For Russian or Russian/English songs, select `--language ru` and pass the local
+MMS_FA weight **file** with `--ctc-model-path /models/torch/hub/checkpoints/model.pt`.
+The Russian profile uses uroman with the `rus` language rules, retains English
+spelling, and maps the resulting Latin labels back to the original glyphs.
+The initial Russian score threshold is `-0.8`; use `--ctc-score-threshold` to override.
+Russian is available through manual selection.
 
 Preview automatic routing with `lyric-align detect --song-dir /data/song`.
 Use `--language auto` on the prepare command to apply the decision. The
@@ -111,7 +117,7 @@ preview reports the reason, including a Mandarin default for ambiguous Han
 lyrics. Once Han lyrics enter the Chinese branch, auto chooses between `zh` and `cant` even with weak pronunciation evidence. Unresolved script-level decisions use `ja-en`.
 See [language detection and corpus results](docs/LANGUAGE_DETECTION.md).
 
-CTC checkpoints are opened with Transformers' `local_files_only=True`.
+NextFire checkpoints are opened with Transformers' `local_files_only=True`.
 Hugging Face Demucs snapshots are also resolved with offline mode enabled, so
 a missing model produces a local error instead of an implicit download.
 

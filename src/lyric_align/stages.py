@@ -11,6 +11,7 @@ import subprocess
 import logging
 import os
 import threading
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
@@ -36,6 +37,7 @@ def clear_model_cache() -> None:
     """Release cached CTC and Demucs objects held by this process."""
     with _MODEL_CACHE_LOCK:
         _CTC_MODEL_CACHE.clear()
+        _load_mms_fa.cache_clear()
         _DEMUCS_MODEL_CACHE.clear()
 
 
@@ -55,6 +57,52 @@ def _load_ctc_bundle(model_path: str, device: str) -> tuple[Any, Any, Any]:
         # If another caller loaded the same model while this one was reading,
         # keep the first object and release the duplicate reference.
         return _CTC_MODEL_CACHE.setdefault(key, bundle)
+
+
+@lru_cache(maxsize=2)
+def _load_mms_fa(model_path: Path, device: str):
+    from torchaudio.pipelines import MMS_FA
+
+    if not model_path.is_file():
+        raise StageUnavailableError(f"MMS_FA checkpoint missing: {model_path}")
+    # The torchaudio bundle reads the explicitly supplied local cache entry.
+    # It also applies the checkpoint's waveform normalization and log-softmax.
+    model = MMS_FA.get_model(with_star=False, dl_kwargs={
+        "model_dir": str(model_path.parent), "file_name": model_path.name, "weights_only": True,
+    })
+    return model.to(device).eval(), MMS_FA.get_dict(star=None), MMS_FA.sample_rate
+
+
+def _ctc_inference(config: AlignmentConfig):
+    """Return the same emission interface for alignment and offset verification."""
+    import torch
+
+    path = config.models.ctc_model_path
+    if path is None:
+        raise StageUnavailableError("ctc_model_path must be provided for CTC alignment")
+    if LANGUAGES[config.language].acoustic_model == "mms_fa":
+        model, vocab, expected_rate = _load_mms_fa(path.resolve(), config.device)
+        blank = vocab["-"]
+
+        def emissions(segment):
+            wave = torch.tensor(segment, device=config.device).unsqueeze(0)
+            return model(wave)[0][0]
+    else:
+        processor, model, _ = _load_ctc_bundle(str(path), config.device)
+        vocab = processor.tokenizer.get_vocab()
+        blank = int(processor.tokenizer.pad_token_id or 0)
+        expected_rate = getattr(processor.feature_extractor, "sampling_rate", config.sample_rate)
+
+        def emissions(segment):
+            inputs = processor(segment, sampling_rate=config.sample_rate, return_tensors="pt")
+            logits = model(**{key: value.to(config.device) for key, value in inputs.items()}).logits[0]
+            return torch.log_softmax(logits, dim=-1)
+
+    if not all(c in vocab and vocab[c] != blank for c in "abcdefghijklmnopqrstuvwxyz"):
+        raise StageUnavailableError("CTC alignment requires a Latin-letter vocabulary and separate blank")
+    if config.sample_rate != expected_rate:
+        raise StageUnavailableError(f"CTC model requires sample_rate={expected_rate}")
+    return emissions, vocab, blank
 
 
 def _repair_token_spans(tokens: list[dict[str, Any]], start_ms: int, end_ms: int) -> tuple[list[dict[str, Any]], bool]:
@@ -423,33 +471,21 @@ def align_ctc(
     config: AlignmentConfig,
     progress: ProgressCallback | None = None,
 ) -> list[dict[str, Any]]:
-    """Align a selected lyric reading to a vocal stem using NextFire."""
+    """Align the selected reading to the vocal stem with its acoustic model."""
     try:
-        import torch  # noqa: F401
-        import transformers  # noqa: F401
+        import torch
+        emissions, vocab, blank = _ctc_inference(config)
     except ImportError as exc:
-        raise StageUnavailableError("torch and transformers are required for CTC alignment") from exc
-    if config.models.ctc_model_path is None:
-        raise StageUnavailableError("ctc_model_path must be provided for CTC alignment")
-    model_path = str(config.models.ctc_model_path)
-    processor, model, torch = _load_ctc_bundle(model_path, config.device)
+        raise StageUnavailableError(f"CTC model runtime unavailable: {exc}") from exc
     audio = _decode_audio(Path(vocal_path), config.ffmpeg_path, config.sample_rate)
-    vocab = processor.tokenizer.get_vocab()
-    blank = int(processor.tokenizer.pad_token_id or 0)
-    if not all(c in vocab for c in "abcdefghijklmnopqrstuvwxyz") or blank in [vocab[c] for c in "abcdefghijklmnopqrstuvwxyz"]:
-        raise StageUnavailableError("The NextFire model requires a Latin-letter vocabulary and separate blank")
-    expected_rate = getattr(processor.feature_extractor, "sampling_rate", config.sample_rate)
-    if config.sample_rate != expected_rate:
-        raise StageUnavailableError(f"CTC model requires sample_rate={expected_rate}")
+    acoustic_model = LANGUAGES[config.language].acoustic_model
 
     def infer(records: list[dict], left: int, right: int) -> tuple[list[dict], float]:
         segment = audio[left:right]
         target = [vocab[r["text"]] for r in records]
-        inputs = processor(segment, sampling_rate=config.sample_rate, return_tensors="pt")
-        logits = model(**{key: value.to(config.device) for key, value in inputs.items()}).logits[0]
-        log_probs = torch.log_softmax(logits, dim=-1)
+        log_probs = emissions(segment)
         spans, score = _forced_align(log_probs, target, blank)
-        ratio = (len(segment) * 1000 / config.sample_rate) / max(1, logits.shape[0])
+        ratio = (len(segment) * 1000 / config.sample_rate) / max(1, log_probs.shape[0])
         tokens = []
         for record, (a, b) in zip(records, spans):
             char = record["text"]
@@ -503,7 +539,7 @@ def align_ctc(
             if right - left < 400 or not char_records:
                 updated = dict(line, alignment_status="fallback", coverage=coverage, tokens=[], ctc_score=-1e9)
                 updated["ctc_window"] = {"start_ms": window_start, "end_ms": window_end, "source": window_source,
-                                         "profile": "nextfire", "target": target_text}
+                                         "profile": acoustic_model, "target": target_text}
                 updated["warnings"] = list(line.get("warnings") or []) + ["CTC empty target or audio shorter than model receptive field"]
                 output.append(updated)
                 completed += 1
@@ -516,7 +552,7 @@ def align_ctc(
             tokens, locally_repaired = _repair_token_spans(tokens, window_start, window_end)
             updated = dict(line, warnings=list(line.get("warnings") or []))
             updated["ctc_score"] = round(score, 4)
-            updated["ctc_window"] = {"start_ms": window_start, "end_ms": window_end, "source": window_source, "profile": "nextfire", "target": target_text}
+            updated["ctc_window"] = {"start_ms": window_start, "end_ms": window_end, "source": window_source, "profile": acoustic_model, "target": target_text}
             base_quality = coverage >= config.ctc_coverage_threshold and score >= config.ctc_score_threshold
             global_repaired = False
             required = _singable_tokens(tokens)
@@ -595,12 +631,11 @@ def score_offset_candidates(
     """
     import math
     try:
-        processor, model, torch = _load_ctc_bundle(str(config.models.ctc_model_path), config.device)
+        import torch
+        emit, vocab, blank = _ctc_inference(config)
     except (ImportError, OSError) as exc:
         raise StageUnavailableError(f"offset acoustic verification unavailable: {exc}") from exc
     audio = _decode_audio(audio_path, config.ffmpeg_path, config.sample_rate)
-    vocab = processor.tokenizer.get_vocab()
-    blank = int(processor.tokenizer.pad_token_id or 0)
     results = []
     with torch.inference_mode():
         for offset in offsets:
@@ -615,9 +650,7 @@ def score_offset_candidates(
                     scores.append(None)
                     reasons.append("invalid_window_or_vocabulary")
                     continue
-                inputs = processor(audio[left:right], sampling_rate=config.sample_rate, return_tensors="pt")
-                logits = model(**{key: value.to(config.device) for key, value in inputs.items()}).logits[0]
-                log_probs = torch.log_softmax(logits, dim=-1)
+                log_probs = emit(audio[left:right])
                 spans, _ = _forced_align(log_probs, target, blank)
                 if any(b <= a for a, b in spans):
                     scores.append(None)

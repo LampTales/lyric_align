@@ -12,7 +12,7 @@
 
 并提供日语假名、罗马音、普通话拼音和粤拼。运行时不依赖人工修正；模型低置信度时自动回退到更粗粒度的时间轴。人工页面只用于离线诊断和构建未来评测集。
 
-当前不保证：歌手特殊读法一定被自动识别、和声一定被排除、每个字符都达到人工标注精度。当前 CTC 模型为经过日语卡拉 OK 微调的 NextFire。
+当前不保证：歌手特殊读法一定被自动识别、和声一定被排除、每个字符都达到人工标注精度。日英使用 NextFire，普通话、粤语和手选俄语使用 MMS_FA。
 
 ## 2. 目录约定
 
@@ -74,7 +74,9 @@ python prepare_reading.py --backend sudachi --out results/reading_sudachi
 
 选择 `language="zh"` 或 `"cant"` 后，连续汉字交给 pypinyin 或 ToJyutping 取词组读音，每个汉字保留音节和原文位置。英文使用小写原拼写，词内撇号保留。CTC 接收连续标签，字与字之间不插空格。一个汉字取其首个字母起点和最后一个字母终点，英文按原文字母投影。对未收录的字、其他文字及数字，记录缺失读音并计入覆盖率。回退时按汉字音节和英文词插值，标点与空格保留原位。整句署名和间奏标记在读音转换前过滤，括号内实际演唱的内容参与对齐。
 
-中文与日英路径共用整体偏移估计、可选声学复核、人声活动窗、CTC 质量门槛、局部时长修复和最终显示投影。样本阈值分析见 [中文 NextFire 初版评测](docs/CHINESE_NEXTFIRE.md)。
+手选 `ru` 时，uroman 在整个俄语词内应用 `rus` 转写规则，按原文位置分配标签。共用读音的字母共享声学区间，显示阶段再分配扫色时间。保留英语拼写和缩写中的撇号。俄语首版对 `ВДВ` 使用字母名展开。声学模型读取本地 MMS_FA 权重文件，输出使用同一 schema，`ctc_window.profile` 为 `mms_fa`。在三首歌曲的 99 个初测窗口中，默认门槛 −0.8 通过 91 个原歌词窗口和 34 个同曲错配窗口，后者用长度相近的其他句子构造。该统计衡量筛选能力，实际逐字准确性需要试听。
+
+中文与日英路径共用整体偏移估计、可选声学复核、人声活动窗、CTC 质量门槛、局部时长修复和最终显示投影。中文 MMS_FA 沿用六首试听样本的门槛 `-2.25`。早期 NextFire 样本阈值分析见 [中文 NextFire 初版评测](docs/CHINESE_NEXTFIRE.md)。
 
 ### 4.2 日语 reading 规则
 
@@ -168,7 +170,7 @@ export HF_HOME="$PWD/models/huggingface"
 
 CTC 模型输入人声波形，输出每个声学帧对词表标签的概率。歌词 reading 已知时，库的 CTC stage 在句级窗口（当前为前后各 500 ms）内用 Viterbi 搜索一条必须经过完整拉丁 target 的路径。它不是重新识别歌词，而是在已知歌词下估计每个字符的时间。
 
-当前模型：`NextFire/mms-300m-ForcedAligner-karaoke-ja-Latn`。模型目录必须在 `models/huggingface/`，推理使用 `local_files_only=True`，避免运行时偷偷联网。
+日英模型：`NextFire/mms-300m-ForcedAligner-karaoke-ja-Latn`。模型目录必须在 `models/huggingface/`，推理使用 `local_files_only=True`，避免运行时偷偷联网。
 
 ## 6. 统一产物格式
 
@@ -244,11 +246,11 @@ CTC 路径完整、覆盖率足够、分数过阈值
 
 ### 相邻句边界复核
 
-逐句 CTC 完成后，普通话、粤语和日英共用同一轮自动复核。连续两句均通过 CTC、读音有别，且各至少含三个读音单元时，检查边界 120 ms 内是否存在被至少 350 ms 空档隔开的标签。结合两侧标签置信度筛选后，用已载入的 NextFire 在两个不同上下文中对齐局部读音。两个窗口须支持相同的越界方向，临近单元起止相差至多 180 ms，且能接回保留的句内锚点，才允许句界移动 220–950 ms。前句收尾和后句起唱分别记录，保留自然停顿。
+逐句 CTC 完成后，各语言共用同一轮自动复核。连续两句均通过 CTC、读音有别，且各至少含三个读音单元时，检查边界 120 ms 内是否存在被至少 350 ms 空档隔开的标签。结合两侧标签置信度筛选后，用当前语言的对齐模型在两个不同上下文中对齐局部读音。两个窗口须支持相同的越界方向，临近单元起止相差至多 180 ms，且能接回保留的句内锚点，才允许句界移动 220–950 ms。前句收尾和后句起唱分别记录，保留自然停顿。
 
 对间奏前拖尾，另查末两个读音单元内部是否有长空档，其中至少连续 2 秒的人声很弱。裁到静音入口附近复算两次，核对末字时刻与人声衰减是否相符。通过时只修句尾读音和 `singing_end_ms`。产物在 `ctc_window.boundary_repairs` 中记录采用的改动，`original_start_ms`、`original_end_ms` 和全曲偏移继续保留原义。质量门未通过的候选沿用第一次的结果。
 
-如果一段歌词中多句起唱都偏早或偏晚，再用分离人声复核段内偏移。每个句首前后各 1 秒内寻找明显的音量上升。相邻五句中至少三种不同读音的句子支持同向偏移（距局部中位数至多 150 ms），且偏移幅度为 270–900 ms 时，才复用 NextFire 在原句界两侧重算相邻两句的完整读音。窗口位置独立于估计出的偏移量。复算句首须与估计相差至多 160 ms，并在附近另一句不同歌词上得到同向的 CTC 结果。
+如果一段歌词中多句起唱都偏早或偏晚，再用分离人声复核段内偏移。每个句首前后各 1 秒内寻找明显的音量上升。相邻五句中至少三种不同读音的句子支持同向偏移（距局部中位数至多 150 ms），且偏移幅度为 270–900 ms 时，才复用当前模型在原句界两侧重算相邻两句的完整读音。窗口位置独立于估计出的偏移量。复算句首须与估计相差至多 160 ms，并在附近另一句不同歌词上得到同向的 CTC 结果。
 
 通过复核时，只在可接回句内读音的位置更新前句收尾和后句起唱。长间奏、回退行和已修复的同侧边界会限制复核范围。采用的边界记为 `reason=section`，后句记录估计值 `section_offset_ms`。此步骤复用已分离的人声，额外模型推理次数随候选句数变化。
 
@@ -332,7 +334,7 @@ PYTHONPATH=src python -m lyric_align.cli prepare \
 
 ### NextFire Latin target
 
-The CTC stage always uses the NextFire karaoke checkpoint. Japanese morae are
+The Japanese/English path uses the NextFire karaoke checkpoint. Japanese morae are
 converted to Latin letters, while Latin words use their surface spelling;
 punctuation and spaces are omitted. Each target letter retains source reading
 and surface indices, so the resulting mora/display units can still highlight

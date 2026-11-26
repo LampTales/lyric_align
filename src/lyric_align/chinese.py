@@ -1,9 +1,11 @@
-"""Mandarin/Cantonese NextFire readings with explicit lyric character offsets."""
+"""Mandarin/Cantonese Latin readings with explicit lyric character offsets."""
 from __future__ import annotations
 
 import re
 import unicodedata
 from typing import Any, Iterator
+
+from .ctc_text import surface_reading
 
 
 # Keep Han runs together so the dictionaries can resolve phrase readings.
@@ -57,43 +59,4 @@ def _pieces(text: str, language: str) -> Iterator[tuple[str, str, bool]]:
 
 
 def chinese_reading(text: str, language: str) -> tuple[str, list[dict[str, Any]]]:
-    words: list[str] = []
-    spans = []
-    position = cursor = 0
-    for surface, target, han in _pieces(text, language):
-        sound = target if target != "?" else ""
-        indices = []
-        if sound:
-            if words:
-                cursor += 1  # separator in the diagnostic reading string
-            indices = [len(words)]
-            words.append(sound)
-        end = position + len(surface)
-        spans.append({
-            "surface": surface, "surface_start": position, "surface_end": end,
-            "reading": sound, "reading_start": cursor, "reading_end": cursor + len(sound),
-            "romaji": sound if han else "", "mora_indices": indices,
-            "ctc_text": target, "mapping_confidence": "low" if target == "?" else "high",
-        })
-        position, cursor = end, cursor + len(sound)
-    return " ".join(words), spans
-
-
-def chinese_target(spans: list[dict[str, Any]], vocab: dict[str, int]) -> tuple[list[dict[str, Any]], float, str]:
-    records = []
-    full = "".join(span["ctc_text"] for span in spans)
-    for span in spans:
-        start, end = span["surface_start"], span["surface_end"]
-        for i, char in enumerate(span["ctc_text"]):
-            if char == "?" or char not in vocab:
-                continue
-            # A Han syllable owns all of its letters. English spelling maps
-            # individual letters (and contraction apostrophes) to their glyphs.
-            pos = start + i if end - start > 1 else start
-            records.append(dict(
-                text=char, source_reading_index=span["reading_start"] + i,
-                source_mora_indices=span["mora_indices"], source_unit=str(pos),
-                source_surface_start=pos, source_surface_end=pos + 1,
-                source_text=span["reading"] if end - start == 1 else char,
-            ))
-    return records, len(records) / max(1, len(full)), full
+    return surface_reading(_pieces(text, language))

@@ -1,4 +1,4 @@
-"""Check suspicious joins using the same vocal stem and NextFire model as the first pass."""
+"""Check suspicious joins using the same vocal stem and acoustic model as the first pass."""
 from __future__ import annotations
 
 from itertools import groupby

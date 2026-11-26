@@ -54,6 +54,8 @@ def _stage_signature(config: AlignmentConfig, stage: str) -> str:
         values = config.as_dict()
     if config.language != "ja-en" and stage in {"reading", "ctc"}:
         values["language"] = config.language
+        if stage == "ctc" and config.language in {"zh", "cant"}:
+            values["acoustic_model"] = LANGUAGES[config.language].acoustic_model
     payload = json.dumps(values, ensure_ascii=False, sort_keys=True).encode()
     return hashlib.sha256(payload).hexdigest()
 
@@ -292,6 +294,8 @@ def _build_display_units(
             else (str(span.get("reading") or "") if not has_mora_source_map else "")
         )
         annotation, latin = profile.annotation(char, unit_reading, span)
+        if span.get("shared_surface") and index != span["surface_start"]:
+            annotation = latin = ""
         units.append({
             "text": char,
             "surface_index": index,
@@ -552,8 +556,6 @@ def prepare_song(
     each adapter writes into the same versioned output contract.
     """
     config = config or AlignmentConfig()
-    if config.offset_acoustic_verify and not Path(config.models.ctc_model_path).is_dir():
-        raise StageUnavailableError("offset acoustic verification requires a local CTC model directory")
     song_dir = Path(song_dir)
     files = validate_song_directory(song_dir)
     requested_config = config
@@ -562,6 +564,17 @@ def prepare_song(
         decision = detect_language(song_dir)
         detection = decision.as_dict()
         config = replace(config, language=decision.language)
+    profile = LANGUAGES[config.language]
+    if profile.acoustic_model == "mms_fa" and config.models.mms_fa_model_path is not None:
+        config = replace(config, models=replace(config.models, ctc_model_path=config.models.mms_fa_model_path))
+    if "ctc" in stages or config.offset_acoustic_verify:
+        checkpoint = config.models.ctc_model_path
+        if profile.acoustic_model == "mms_fa" and not (checkpoint and checkpoint.is_file()):
+            raise StageUnavailableError(f"{config.language} alignment requires a local MMS_FA checkpoint file (--mms-fa-model-path or --ctc-model-path)")
+        if profile.acoustic_model == "nextfire" and config.models.mms_fa_model_path and not checkpoint:
+            raise StageUnavailableError("Japanese/English alignment requires a local NextFire CTC model directory (--ctc-model-path)")
+        if profile.acoustic_model == "nextfire" and config.offset_acoustic_verify and not (checkpoint and checkpoint.is_dir()):
+            raise StageUnavailableError("offset acoustic verification requires a local CTC model directory")
     destination = Path(output_path) if output_path is not None else song_dir / "alignment.json"
     cached = _load_artifact(destination)
     preprocessing = _load_preprocessing(song_dir / "preprocessing.json")
@@ -763,7 +776,7 @@ def prepare_song(
         vocal = stem_paths.get("vocals")
         if not vocal:
             raise StageUnavailableError("ctc stage requires a Demucs vocals output")
-        stage_state["ctc"] = {"status": "running", "model": str(config.models.ctc_model_path), "signature": _stage_signature(config, "ctc")}
+        stage_state["ctc"] = {"status": "running", "profile": profile.acoustic_model, "model": str(config.models.ctc_model_path), "signature": _stage_signature(config, "ctc")}
         try:
             if progress:
                 progress("activity", 0.0, "detecting vocal end points")

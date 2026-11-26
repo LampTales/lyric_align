@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any
+from typing import Any, Iterator
 
 from .g2p import kata_to_hira, romaji, split_mora
 
@@ -153,3 +153,49 @@ def group_ctc_tokens(tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 value[key] = first[key]
         result.append(value)
     return result
+
+
+def surface_reading(pieces: Iterator[tuple[str, str, bool]]) -> tuple[str, list[dict[str, Any]]]:
+    words: list[str] = []
+    spans = []
+    position = cursor = 0
+    for surface, target, annotate in pieces:
+        sound = target if target != "?" else ""
+        indices = []
+        if sound:
+            if words:
+                cursor += 1  # separator in the diagnostic reading string
+            indices = [len(words)]
+            words.append(sound)
+        end = position + len(surface)
+        spans.append({
+            "surface": surface, "surface_start": position, "surface_end": end,
+            "reading": sound, "reading_start": cursor, "reading_end": cursor + len(sound),
+            "romaji": sound if annotate else "", "mora_indices": indices,
+            "ctc_text": target, "mapping_confidence": "low" if target == "?" else "high",
+        })
+        if annotate and len(surface) > 1:
+            spans[-1]["shared_surface"] = True
+        position, cursor = end, cursor + len(sound)
+    return " ".join(words), spans
+
+
+def surface_target(spans: list[dict[str, Any]], vocab: dict[str, int]) -> tuple[list[dict[str, Any]], float, str]:
+    records = []
+    full = "".join(span["ctc_text"] for span in spans)
+    for span in spans:
+        start, end = span["surface_start"], span["surface_end"]
+        shared = span.get("shared_surface", False)
+        for i, char in enumerate(span["ctc_text"]):
+            if char == "?" or char not in vocab:
+                continue
+            # A transliterated unit owns its letters. English spelling maps
+            # individual letters (and contraction apostrophes) to their glyphs.
+            pos = start + i if end - start > 1 and not shared else start
+            records.append(dict(
+                text=char, source_reading_index=span["reading_start"] + i,
+                source_mora_indices=span["mora_indices"], source_unit=str(pos),
+                source_surface_start=pos, source_surface_end=end if shared else pos + 1,
+                source_text=span["reading"] if end - start == 1 or shared else char,
+            ))
+    return records, len(records) / max(1, len(full)), full

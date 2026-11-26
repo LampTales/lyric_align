@@ -31,21 +31,22 @@ class ModelPaths:
 
     demucs_model_path: Path | None = None
     ctc_model_path: Path | None = None
+    mms_fa_model_path: Path | None = None
 
     def __post_init__(self) -> None:
-        for name in ("demucs_model_path", "ctc_model_path"):
+        for name in ("demucs_model_path", "ctc_model_path", "mms_fa_model_path"):
             value = getattr(self, name)
             if value is not None and not isinstance(value, Path):
                 object.__setattr__(self, name, Path(value))
 
     def as_dict(self) -> dict[str, str | None]:
-        return {
-            name: str(value) if value is not None else None
-            for name, value in (
-                ("demucs_model_path", self.demucs_model_path),
-                ("ctc_model_path", self.ctc_model_path),
-            )
+        paths = {
+            "demucs_model_path": str(self.demucs_model_path) if self.demucs_model_path else None,
+            "ctc_model_path": str(self.ctc_model_path) if self.ctc_model_path else None,
         }
+        if self.mms_fa_model_path is not None:
+            paths["mms_fa_model_path"] = str(self.mms_fa_model_path)
+        return paths
 
 
 @dataclass(frozen=True)
@@ -90,14 +91,14 @@ class AlignmentConfig:
     # CTC-search gate. The CLI/environment use the explicit CTC name.
     activity_confidence_threshold: float = DEFAULT_CTC_ACTIVITY_CONFIDENCE_THRESHOLD
     activity_projection_confidence_threshold: float = DEFAULT_ACTIVITY_PROJECTION_CONFIDENCE_THRESHOLD
-    # User-validated operating point for the current NextFire model.
-    ctc_score_threshold: float = -2.25
+    # None selects the operating point for the language profile.
+    ctc_score_threshold: float | None = None
     ctc_coverage_threshold: float = 0.8
     # Change this internal cache marker when processing policy changes
     # invalidate cached alignments. It is not the Python package version.
     pipeline_version: str = "0.14"
 
-    # Explicit song-wide reading path. All paths share the NextFire model.
+    # Explicit song-wide reading path. Mandarin, Cantonese and Russian select MMS_FA.
     language: str = "ja-en"
 
     @property
@@ -125,7 +126,7 @@ class AlignmentConfig:
             raise ValueError("offset_boundary_tolerance_ms must not be negative")
         if not math.isfinite(self.offset_acoustic_min_margin) or self.offset_acoustic_min_margin <= 0:
             raise ValueError("offset_acoustic_min_margin must be finite and positive")
-        if self.offset_acoustic_verify and (not self.enable_offset or self.models.ctc_model_path is None):
+        if self.offset_acoustic_verify and (not self.enable_offset or not (self.models.ctc_model_path or self.models.mms_fa_model_path)):
             raise ValueError("offset_acoustic_verify requires enable_offset and ctc_model_path")
         if self.ctc_margin_ms < 0:
             raise ValueError("ctc_margin_ms must not be negative")
@@ -135,6 +136,8 @@ class AlignmentConfig:
             raise ValueError("activity_confidence_threshold must be between 0 and 1")
         if not 0.0 <= float(self.activity_projection_confidence_threshold) <= 1.0:
             raise ValueError("activity_projection_confidence_threshold must be between 0 and 1")
+        if self.ctc_score_threshold is None:
+            object.__setattr__(self, "ctc_score_threshold", -0.8 if language == "ru" else -2.25)
         if not math.isfinite(float(self.ctc_score_threshold)):
             raise ValueError("ctc_score_threshold must be finite")
         if not 0.0 <= float(self.ctc_coverage_threshold) <= 1.0:

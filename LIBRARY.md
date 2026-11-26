@@ -40,13 +40,13 @@ not need to modify internal modules. The main controls are:
 
 | Area | Parameters |
 | --- | --- |
-| text | `g2p_backend` (`sudachi` by default for `language="ja-en"`), `language` (`ja-en`, `zh`, `cant`, `auto`) |
+| text | `g2p_backend` (`sudachi` by default for `language="ja-en"`), `language` (`ja-en`, `zh`, `cant`, manual `ru`, `auto`) |
 | execution | `device`, `ffmpeg_path`, `sample_rate` |
 | Demucs/output | `demucs_model_name`, `keep_vocals`, `keep_instrumental`, `vocals_format`, `instrumental_format`, `vocals_bitrate`, `instrumental_bitrate` |
 | offset | `enable_offset`, `offset_low_ms`, `offset_high_ms`, `offset_step_ms` |
 | offset boundaries | `offset_boundary_check` (true), `offset_silence_ms` (2000), `offset_sustain_ms` (200), `offset_boundary_tolerance_ms` (800) |
 | experimental offset verification | `offset_acoustic_verify` (false), `offset_acoustic_min_margin` (0.15) |
-| CTC | NextFire model via `ModelPaths.ctc_model_path`, `ctc_margin_ms`, `ctc_score_threshold` |
+| CTC | NextFire snapshot via `ModelPaths.ctc_model_path`, Mandarin/Cantonese/Russian MMS_FA weight file via `mms_fa_model_path`, `ctc_margin_ms`, `ctc_score_threshold` |
 
 `ModelPaths` keeps model resources independent. CTC and Demucs objects are
 cached by resolved model path and device inside each Python process, so a
@@ -90,8 +90,7 @@ conversion.
 - `models`: the independently supplied resource paths/provenance;
 - `artifacts`: relative stem and preprocessing paths, or `null` when absent.
 
-The CTC stage uses the downloaded NextFire MMS-300M checkpoint's lowercase
-Latin vocabulary: Japanese readings are romanized, Latin words retain their
+The Japanese/English path uses NextFire. Mandarin and Cantonese use MMS_FA with pinyin or Jyutping. Both checkpoints accept lowercase Latin labels: Japanese readings are romanized, Latin words retain their
 surface spelling, and punctuation or spaces are omitted from the acoustic
 target. Source reading and surface indices are retained in `tokens` and
 `mora`; the displayed lyric remains unchanged. This is a text-target policy,

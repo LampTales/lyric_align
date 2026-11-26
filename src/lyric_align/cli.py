@@ -30,11 +30,12 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--song-dir", type=Path, required=True)
     prepare.add_argument("--output", type=Path)
     prepare.add_argument("--language", type=canonical_language, choices=SUPPORTED_LANGUAGES, default="ja-en",
-                         help="lyric reading path: Japanese/English, Mandarin, or Cantonese, or auto")
+                         help="lyric reading path: Japanese/English, Mandarin, Cantonese, Russian (manual), or auto")
     prepare.add_argument("--g2p-backend", choices=("openjtalk", "sudachi", "pykakasi"), default="sudachi")
     prepare.add_argument("--demucs-model-path", type=Path)
     prepare.add_argument("--demucs-model-name", default="htdemucs")
-    prepare.add_argument("--ctc-model-path", type=Path)
+    prepare.add_argument("--ctc-model-path", type=Path, help="NextFire snapshot directory, or MMS_FA weight file for a single MMS route")
+    prepare.add_argument("--mms-fa-model-path", type=Path, help="local MMS_FA weight file for Mandarin, Cantonese and Russian; pass both checkpoints for auto")
     prepare.add_argument("--device", default="cpu")
     prepare.add_argument("--ffmpeg-path", default="ffmpeg")
     prepare.add_argument("--keep-vocals", action="store_true", help="retain the vocal stem after CTC")
@@ -49,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
                          help="minimum activity confidence for narrowing CTC search windows")
     prepare.add_argument("--activity-projection-confidence-threshold", type=float, default=DEFAULT_ACTIVITY_PROJECTION_CONFIDENCE_THRESHOLD,
                          help="minimum activity confidence for fallback interpolation and display projection")
-    prepare.add_argument("--ctc-score-threshold", type=float, default=-2.25)
+    prepare.add_argument("--ctc-score-threshold", type=float)
     prepare.add_argument("--ctc-coverage-threshold", type=float, default=0.8)
     prepare.add_argument("--offset-low-ms", type=int, default=-2000)
     prepare.add_argument("--offset-high-ms", type=int, default=2000)
@@ -100,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         models=ModelPaths(
             demucs_model_path=args.demucs_model_path,
             ctc_model_path=args.ctc_model_path,
+            mms_fa_model_path=args.mms_fa_model_path,
         ),
     )
     try:

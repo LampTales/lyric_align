@@ -29,7 +29,8 @@ def test_mixed_target_and_display_keep_character_identity(language, han):
     assert (reading, coverage, target) == (f"{han} don't summer", 1, han + "don'tsummer")
     assert all(reading[s["reading_start"]:s["reading_end"]] == s["reading"] for s in spans)
     tokens = [dict(r, start_ms=100 + i * 35, end_ms=120 + i * 35, frame_confidence=-0.2) for i, r in enumerate(records)]
-    line.update(mora=group_ctc_tokens(tokens), ctc_window={"profile": "nextfire"})
+    assert LANGUAGES[language].acoustic_model == "mms_fa"
+    line.update(mora=group_ctc_tokens(tokens), ctc_window={"profile": "mms_fa"})
     units = pipeline._build_display_units(line, language=language)
     assert "".join(u["text"] for u in units) == text
     assert units[0]["reading"] == units[0]["romaji"] == han
@@ -57,8 +58,10 @@ def test_language_switch_and_ctc_retry_keep_correct_offset(tmp_path, monkeypatch
     song = make_song(tmp_path, ["重庆！", "作词：A"])
     (song / "stems").mkdir()
     (song / "stems/vocals.wav").write_bytes(b"vocals")
+    checkpoint = tmp_path / "model.pt"
+    checkpoint.touch()
     cfg = AlignmentConfig(language="zh", keep_vocals=True, vocals_format="wav",
-                          models=ModelPaths(ctc_model_path=tmp_path))
+                          models=ModelPaths(ctc_model_path=tmp_path, mms_fa_model_path=checkpoint))
     offsets = []
 
     def offset(audio, starts, config, **kwargs):
@@ -69,6 +72,7 @@ def test_language_switch_and_ctc_retry_keep_correct_offset(tmp_path, monkeypatch
     monkeypatch.setattr(pipeline, "estimate_voice_endings", lambda path, rows, **kw: rows)
 
     def align(path, rows, config, callback):
+        assert config.models.ctc_model_path == checkpoint
         row = rows[0]
         assert row["start_ms"] == 300
         assert row["status"] == "interpolation" and not row["tokens"]
@@ -86,6 +90,39 @@ def test_language_switch_and_ctc_retry_keep_correct_offset(tmp_path, monkeypatch
     assert failed.lines[0].original_start_ms == 100
     assert "old repair" not in failed.lines[0].warnings
     assert offsets == [("zh", [100]), ("cant", [100])]
+
+
+@pytest.mark.parametrize(("texts", "language", "profile"), [
+    (["春天", "冬天"], "zh", "mms_fa"),
+    (["佢哋", "唔好"], "cant", "mms_fa"),
+    (["hello", "world"], "ja-en", "nextfire"),
+])
+def test_auto_resolves_model_before_offset_verification(tmp_path, monkeypatch, texts, language, profile):
+    song = make_song(tmp_path, texts)
+    (song / "stems").mkdir()
+    (song / "stems/vocals.wav").touch()
+    mms = tmp_path / "model.pt"
+    mms.touch()
+    paths = ModelPaths(ctc_model_path=tmp_path, mms_fa_model_path=mms)
+    config = AlignmentConfig(language="auto", models=paths, offset_acoustic_verify=True,
+                             keep_vocals=True, vocals_format="wav")
+    seen = []
+    def verify(audio, rows, estimate, config):
+        seen.append(config.models.ctc_model_path)
+        return estimate
+
+    def align(audio, rows, config, progress):
+        seen.append(config.models.ctc_model_path)
+        return rows
+
+    monkeypatch.setattr("lyric_align.offset_verify.verify_offset", verify)
+    monkeypatch.setattr(pipeline, "align_ctc", align)
+    monkeypatch.setattr(pipeline, "estimate_offset", lambda *args, **kwargs: {"offset_ms": 0})
+    monkeypatch.setattr(pipeline, "estimate_voice_endings", lambda path, rows, **kwargs: rows)
+    artifact = prepare_song(song, config=config, stages=("reading", "ctc"))
+    assert seen == [mms if profile == "mms_fa" else tmp_path] * 2
+    assert artifact.stages["reading"]["detection"]["language"] == language
+    assert artifact.stages["ctc"]["profile"] == profile
 
 
 @pytest.mark.parametrize(("alias", "name", "reading"), [("cmn", "zh", "chong qing"), ("yue", "cant", "cung hing")])
