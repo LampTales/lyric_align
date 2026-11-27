@@ -10,7 +10,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from . import chinese, g2p, russian
+from . import chinese, french, g2p, russian
 from .chinese import _HAN
 from .exceptions import InputValidationError
 from .languages import LANGUAGES
@@ -30,7 +30,7 @@ class LanguageDecision:
     language: str
     reason: str
     evidence: dict[str, int]
-    version: int = 5
+    version: int = 6
     fallback: bool = False
 
     def as_dict(self) -> dict:
@@ -107,6 +107,7 @@ def _detection_rows(timeline: list[dict]) -> dict[str, dict]:
         text = unicodedata.normalize("NFKC", str(row.get("text") or "")).casefold().strip()
         if (not any(c.isalpha() for c in text) or g2p.NON_SUNG.search(text)
                 or chinese.is_credit_or_marker(text) or russian.is_credit_or_marker(text)
+                or french.is_credit_or_marker(text)
                 or _CREDIT.search(text) or _INSTRUMENTAL.fullmatch(text)):
             continue
         if text not in rows or (not rows[text].get("romanization") and row.get("romanization")):
@@ -140,6 +141,8 @@ def _count_evidence(rows: dict[str, dict]) -> Counter[str]:
                 scripts.add("russian")
         if "han" in scripts or "kana" in scripts:
             scripts.add("han_or_kana")
+        if "latin" in scripts and french.has_french_evidence(text):
+            scripts.add("french")
         counts.update(sorted(scripts))
         if _CANTONESE.search(text):
             counts["cantonese_marker"] += 1
@@ -190,5 +193,7 @@ def detect_language(song_dir: str | Path) -> LanguageDecision:
     if counts["han"] * 3 >= n:
         return _chinese_decision(rows, directory / "lyrics_raw.json", counts)
     if counts["latin"] and counts["latin"] * 2 >= n:
+        if counts["french"] >= 2 and counts["french"] * 3 >= n:
+            return LanguageDecision("fr", "french_spelling", evidence)
         return LanguageDecision("ja-en", "latin_spelling", evidence)
     return LanguageDecision("ja-en", "insufficient_text", evidence, fallback=True)

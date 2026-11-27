@@ -98,6 +98,7 @@ def test_language_switch_and_ctc_retry_keep_correct_offset(tmp_path, monkeypatch
     (["佢哋", "唔好"], "cant", "mms_fa"),
     (["hello", "world"], "ja-en", "nextfire"),
     (["Я и you", "А я sing"], "ru", "mms_fa"),
+    (["Je chante", "C’est toi"], "fr", "mms_fa"),
 ])
 def test_auto_resolves_model_before_offset_verification(tmp_path, monkeypatch, texts, language, profile, overrides):
     song = make_song(tmp_path, texts)
@@ -108,7 +109,7 @@ def test_auto_resolves_model_before_offset_verification(tmp_path, monkeypatch, t
     paths = ModelPaths(ctc_model_path=tmp_path, mms_fa_model_path=mms)
     config = AlignmentConfig(language="auto", models=paths, offset_acoustic_verify=True,
                              keep_vocals=True, vocals_format="wav", ctc_score_thresholds=overrides)
-    expected = overrides.get(language, -0.8 if language == "ru" else -2.25)
+    expected = overrides.get(language, -0.8 if language in {"ru", "fr"} else -2.25)
     assert replace(config, language=language).ctc_score_threshold == expected
     seen = []
     def verify(audio, rows, estimate, config):

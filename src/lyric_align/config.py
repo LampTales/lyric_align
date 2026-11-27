@@ -98,7 +98,7 @@ class AlignmentConfig:
     # invalidate cached alignments. It is not the Python package version.
     pipeline_version: str = "0.14"
 
-    # Explicit song-wide reading path. Mandarin, Cantonese and Russian select MMS_FA.
+    # Explicit song-wide reading path. Mandarin, Cantonese, Russian and French select MMS_FA.
     language: str = "ja-en"
     # Optional per-route override when a caller configures separate CTC gates.
     russian_ctc_score_threshold: float | None = None

@@ -40,13 +40,13 @@ not need to modify internal modules. The main controls are:
 
 | Area | Parameters |
 | --- | --- |
-| text | `g2p_backend` (`sudachi` by default for `language="ja-en"`), `language` (`ja-en`, `zh`, `cant`, `ru`, `auto`) |
+| text | `g2p_backend` (`sudachi` by default for `language="ja-en"`), `language` (`ja-en`, `zh`, `cant`, `ru`, `fr`, `auto`) |
 | execution | `device`, `ffmpeg_path`, `sample_rate` |
 | Demucs/output | `demucs_model_name`, `keep_vocals`, `keep_instrumental`, `vocals_format`, `instrumental_format`, `vocals_bitrate`, `instrumental_bitrate` |
 | offset | `enable_offset`, `offset_low_ms`, `offset_high_ms`, `offset_step_ms` |
 | offset boundaries | `offset_boundary_check` (true), `offset_silence_ms` (2000), `offset_sustain_ms` (200), `offset_boundary_tolerance_ms` (800) |
 | experimental offset verification | `offset_acoustic_verify` (false), `offset_acoustic_min_margin` (0.15) |
-| CTC | NextFire snapshot via `ModelPaths.ctc_model_path`, Mandarin/Cantonese/Russian MMS_FA weight file via `mms_fa_model_path`, `ctc_margin_ms`, `ctc_score_threshold` |
+| CTC | NextFire snapshot via `ModelPaths.ctc_model_path`, Mandarin/Cantonese/Russian/French MMS_FA weight file via `mms_fa_model_path`, `ctc_margin_ms`, `ctc_score_threshold` |
 
 `ModelPaths` keeps model resources independent. CTC and Demucs objects are
 cached by resolved model path and device inside each Python process, so a
@@ -91,7 +91,7 @@ conversion.
 - `artifacts`: relative stem and preprocessing paths, or `null` when absent.
 
 After routing, the language profile supplies the acoustic model and default score threshold
-(`-0.8` for Russian, `-2.25` for Japanese/English, Mandarin and Cantonese).
+(`-0.8` for Russian and French, `-2.25` for Japanese/English, Mandarin and Cantonese).
 Use `ctc_score_threshold` for a common override or `ctc_score_thresholds={"ru": -0.65}`
 for a per-language override. Per-language values take priority. Automatic and explicit
 language selection use the same settings.

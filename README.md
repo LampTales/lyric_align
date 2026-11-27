@@ -111,6 +111,8 @@ spelling, and maps the resulting Latin labels back to the original glyphs.
 The initial Russian score threshold is `-0.8`; use `--ctc-score-threshold` to override.
 Automatic routing also selects Russian for qualifying Cyrillic lyrics, including Russian/English songs.
 
+For French and French/English singing, select `--language fr` or use automatic routing. The initial profile uses MMS_FA, folds accents and ligatures for the acoustic target, and preserves the original spelling for display. The initial score threshold is `-0.8`.
+
 Preview automatic routing with `lyric-align detect --song-dir /data/song`.
 Use `--language auto` on the prepare command to apply the decision. The
 preview reports the reason, including a Mandarin default for ambiguous Han

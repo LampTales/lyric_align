@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable
 
-from . import g2p, russian
+from . import french, g2p, russian
 from .chinese import chinese_reading, is_non_sung
 from .ctc_text import surface_reading, surface_target
 from .ctc_text import build_target as japanese_target
@@ -31,6 +31,14 @@ def _japanese_reading(text: str, backend: str) -> Reading:
 
 def _chinese_reading(language: str, text: str, backend: str) -> Reading:
     reading, spans = chinese_reading(text, language)
+    return _mapped_reading(reading, spans)
+
+
+def _french_reading(text: str, backend: str) -> Reading:
+    reading, spans = surface_reading(french.pieces(text))
+    for span in spans:
+        if len(span["surface"]) > 1 and span["reading"]:
+            span["shared_surface"] = True  # A decomposed accent belongs to its base glyph.
     return _mapped_reading(reading, spans)
 
 
@@ -83,6 +91,9 @@ LANGUAGES = {
     "ja-en": LanguageProfile(None, _japanese_reading, g2p.split_mora, japanese_target, _japanese_annotation),
     "zh": _chinese_profile("zh", "pypinyin"),
     "cant": _chinese_profile("cant", "ToJyutping"),
+    "fr": LanguageProfile("fr-latin", _french_reading, str.split, _surface_target, _span_annotation,
+                          french.is_non_sung, exact_surface_ranges=True, acoustic_model="mms_fa",
+                          ctc_score_threshold=-0.8),
     "ru": LanguageProfile("uroman", _russian_reading, str.split, _surface_target, _span_annotation,
                           russian.is_non_sung, exact_surface_ranges=True, acoustic_model="mms_fa", ctc_score_threshold=-0.8),
 }
