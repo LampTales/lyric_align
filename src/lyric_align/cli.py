@@ -30,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--song-dir", type=Path, required=True)
     prepare.add_argument("--output", type=Path)
     prepare.add_argument("--language", type=canonical_language, choices=SUPPORTED_LANGUAGES, default="ja-en",
-                         help="lyric reading path: Japanese/English, Mandarin, Cantonese, Russian (manual), or auto")
+                         help="lyric reading path: Japanese/English, Mandarin, Cantonese, Russian, or auto")
     prepare.add_argument("--g2p-backend", choices=("openjtalk", "sudachi", "pykakasi"), default="sudachi")
     prepare.add_argument("--demucs-model-path", type=Path)
     prepare.add_argument("--demucs-model-name", default="htdemucs")

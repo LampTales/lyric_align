@@ -100,6 +100,9 @@ class AlignmentConfig:
 
     # Explicit song-wide reading path. Mandarin, Cantonese and Russian select MMS_FA.
     language: str = "ja-en"
+    # Optional per-route override when a caller configures separate CTC gates.
+    russian_ctc_score_threshold: float | None = None
+    ctc_score_thresholds: dict[str, float] = field(default_factory=dict, hash=False)
 
     @property
     def reading_backend(self) -> str:
@@ -136,9 +139,19 @@ class AlignmentConfig:
             raise ValueError("activity_confidence_threshold must be between 0 and 1")
         if not 0.0 <= float(self.activity_projection_confidence_threshold) <= 1.0:
             raise ValueError("activity_projection_confidence_threshold must be between 0 and 1")
-        if self.ctc_score_threshold is None:
-            object.__setattr__(self, "ctc_score_threshold", -0.8 if language == "ru" else -2.25)
-        if not math.isfinite(float(self.ctc_score_threshold)):
+        for route, value in self.ctc_score_thresholds.items():
+            if route not in LANGUAGES or not math.isfinite(value):
+                raise ValueError("ctc_score_thresholds requires registered language codes and finite scores")
+        if self.russian_ctc_score_threshold is not None:
+            if not math.isfinite(self.russian_ctc_score_threshold):
+                raise ValueError("russian_ctc_score_threshold must be finite")
+            if language == "ru":
+                object.__setattr__(self, "ctc_score_threshold", self.russian_ctc_score_threshold)
+        if language in self.ctc_score_thresholds:
+            object.__setattr__(self, "ctc_score_threshold", self.ctc_score_thresholds[language])
+        elif self.ctc_score_threshold is None and language != "auto":
+            object.__setattr__(self, "ctc_score_threshold", LANGUAGES[language].ctc_score_threshold)
+        if self.ctc_score_threshold is not None and not math.isfinite(float(self.ctc_score_threshold)):
             raise ValueError("ctc_score_threshold must be finite")
         if not 0.0 <= float(self.ctc_coverage_threshold) <= 1.0:
             raise ValueError("ctc_coverage_threshold must be between 0 and 1")
@@ -177,6 +190,8 @@ class AlignmentConfig:
             "activity_confidence_threshold": self.activity_confidence_threshold,
             "activity_projection_confidence_threshold": self.activity_projection_confidence_threshold,
             "ctc_score_threshold": self.ctc_score_threshold,
+            "russian_ctc_score_threshold": self.russian_ctc_score_threshold,
+            **({"ctc_score_thresholds": dict(self.ctc_score_thresholds)} if self.ctc_score_thresholds else {}),
             "ctc_coverage_threshold": self.ctc_coverage_threshold,
             "pipeline_version": self.pipeline_version,
             "models": self.models.as_dict(),

@@ -10,11 +10,14 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from . import chinese, g2p, russian
 from .chinese import _HAN
 from .exceptions import InputValidationError
 from .languages import LANGUAGES
 
 _HAN_CHAR = re.compile(f"[{_HAN}]")
+_RUSSIAN_WORD = re.compile("[а-яё]+")
+_LETTER_RUN = re.compile(r"[^\W\d_]+")
 _KANA = re.compile("[ぁ-ゖァ-ヺ]")
 _CANTONESE = re.compile("佢|哋|喺|嘅|唔|冇|咗|嘢|嚟|啲|嗰|乜|噉")
 _CREDIT = re.compile(r"^(?:作[詞词曲]|編曲|编曲|lyrics|composer|arranger|vocal|produced by|written by)\s*[:：]", re.I)
@@ -27,7 +30,7 @@ class LanguageDecision:
     language: str
     reason: str
     evidence: dict[str, int]
-    version: int = 4
+    version: int = 5
     fallback: bool = False
 
     def as_dict(self) -> dict:
@@ -97,6 +100,65 @@ def _compare_readings(rows: dict[str, dict], raw_path: Path) -> dict[str, int]:
     return counts
 
 
+def _detection_rows(timeline: list[dict]) -> dict[str, dict]:
+    """Filter credits and deduplicate originals before choosing a language."""
+    rows = {}
+    for row in timeline:
+        text = unicodedata.normalize("NFKC", str(row.get("text") or "")).casefold().strip()
+        if (not any(c.isalpha() for c in text) or g2p.NON_SUNG.search(text)
+                or chinese.is_credit_or_marker(text) or russian.is_credit_or_marker(text)
+                or _CREDIT.search(text) or _INSTRUMENTAL.fullmatch(text)):
+            continue
+        if text not in rows or (not rows[text].get("romanization") and row.get("romanization")):
+            rows[text] = row
+
+    return rows
+
+
+def _count_evidence(rows: dict[str, dict]) -> Counter[str]:
+    counts = Counter(unique_lines=len(rows))
+    for text in rows:
+        scripts = set()
+        for c in text:
+            if _KANA.fullmatch(c):
+                scripts.add("kana")
+            elif _HAN_CHAR.fullmatch(c):
+                scripts.add("han")
+            elif c in "ー々〻ゝゞヽヾ":
+                continue  # length and iteration marks provide no independent script evidence
+            elif _RUSSIAN_WORD.fullmatch(c):
+                scripts.add("cyrillic")
+            elif c.isalpha():
+                name = unicodedata.name(c, "")
+                scripts.add("latin" if "LATIN" in name else "other")
+                if "CYRILLIC" in name:
+                    scripts.add("other_cyrillic")
+        if "cyrillic" in scripts:
+            # Count even one-letter words, but ignore lookalikes in mixed-script words.
+            words = _LETTER_RUN.findall(text.replace("\u0301", ""))
+            if sum(len(word) for word in words if _RUSSIAN_WORD.fullmatch(word)) >= 2:
+                scripts.add("russian")
+        if "han" in scripts or "kana" in scripts:
+            scripts.add("han_or_kana")
+        counts.update(sorted(scripts))
+        if _CANTONESE.search(text):
+            counts["cantonese_marker"] += 1
+    return counts
+
+
+def _chinese_decision(rows: dict[str, dict], raw_path: Path, counts: Counter[str]) -> LanguageDecision:
+    scores = _compare_readings(rows, raw_path)
+    evidence = {**counts, **scores}
+    zh, cant = scores["zh_matches"], scores["cant_matches"]
+    if zh != cant:
+        return LanguageDecision("cant" if cant > zh else "zh", "romanization", evidence)
+    if counts["cantonese_marker"] >= 2:
+        return LanguageDecision("cant", "cantonese_orthography", evidence)
+    if counts["han"] < 2:
+        return LanguageDecision("zh", "insufficient_text", evidence, fallback=True)
+    return LanguageDecision("zh", "han_default", evidence)
+
+
 def detect_language(song_dir: str | Path) -> LanguageDecision:
     """Propose an alignment route without loading audio or writing song files."""
     directory = Path(song_dir)
@@ -107,56 +169,26 @@ def detect_language(song_dir: str | Path) -> LanguageDecision:
     if not isinstance(timeline, list) or any(not isinstance(r, dict) for r in timeline):
         raise InputValidationError("lyrics_timeline.json must contain an array of lyric rows")
 
-    rows = {}
-    for row in timeline:
-        text = unicodedata.normalize("NFKC", str(row.get("text") or "")).casefold().strip()
-        if LANGUAGES["zh"].filters(text) or _CREDIT.search(text) or _INSTRUMENTAL.fullmatch(text):
-            continue
-        if text not in rows or (not rows[text].get("romanization") and row.get("romanization")):
-            rows[text] = row
-
-    counts = Counter()
-    for text in rows:
-        scripts = set()
-        for c in text:
-            if _KANA.fullmatch(c):
-                scripts.add("kana")
-            elif _HAN_CHAR.fullmatch(c):
-                scripts.add("han")
-            elif c in "ー々〻ゝゞヽヾ":
-                continue  # length and iteration marks provide no independent script evidence
-            elif c.isalpha():
-                scripts.add("latin" if "LATIN" in unicodedata.name(c, "") else "other")
-        counts.update(sorted(scripts))
-        if _CANTONESE.search(text):
-            counts["cantonese_marker"] += 1
-    n = len(rows)
-    evidence = {"unique_lines": n, **dict(counts)}
-
-    def decision(language: str, reason: str) -> LanguageDecision:
-        return LanguageDecision(language, reason, evidence)
-
-    def fallback(language: str, reason: str) -> LanguageDecision:
-        return LanguageDecision(language, reason, evidence, fallback=True)
+    rows = _detection_rows(timeline)
+    counts = _count_evidence(rows)
+    n = counts["unique_lines"]
+    evidence = dict(counts)
 
     if not n:
-        return fallback("ja-en", "no_sung_text")
-    if counts["other"] * 3 >= n:
-        return fallback("ja-en", "unsupported_script")
+        return LanguageDecision("ja-en", "no_sung_text", evidence, fallback=True)
+    if counts["other_cyrillic"] >= 2 or counts["other"] * 3 >= n:
+        return LanguageDecision("ja-en", "unsupported_script", evidence, fallback=True)
+
+    # A tie with Han/kana continues to the Japanese and Chinese rules below.
+    ru = counts["russian"]
+    if ru >= 2 and ru * 3 >= n and ru > counts["han_or_kana"]:
+        return LanguageDecision("ru", "russian_script", evidence)
+    if counts["cyrillic"] and not (counts["latin"] or counts["han_or_kana"]):
+        return LanguageDecision("ja-en", "unsupported_script", evidence, fallback=True)
     if counts["kana"] >= min(2, n) and counts["kana"] * 3 >= counts["han"]:
-        return decision("ja-en", "kana")
+        return LanguageDecision("ja-en", "kana", evidence)
     if counts["han"] * 3 >= n:
-        scores = _compare_readings(rows, directory / "lyrics_raw.json")
-        evidence.update(scores)
-        # Both match rates have the same denominator (comparable syllables).
-        zh, cant = scores["zh_matches"], scores["cant_matches"]
-        if zh != cant:
-            return decision("cant" if cant > zh else "zh", "romanization")
-        if counts["cantonese_marker"] >= 2:
-            return decision("cant", "cantonese_orthography")
-        if counts["han"] < 2:
-            return fallback("zh", "insufficient_text")
-        return decision("zh", "han_default")
+        return _chinese_decision(rows, directory / "lyrics_raw.json", counts)
     if counts["latin"] and counts["latin"] * 2 >= n:
-        return decision("ja-en", "latin_spelling")
-    return fallback("ja-en", "insufficient_text")
+        return LanguageDecision("ja-en", "latin_spelling", evidence)
+    return LanguageDecision("ja-en", "insufficient_text", evidence, fallback=True)

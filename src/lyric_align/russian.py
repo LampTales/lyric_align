@@ -16,8 +16,12 @@ _MARKER = re.compile(r"^\s*[\[(](?:куплет|припев|бридж|интр
 _CREDIT = re.compile(r"^(?:автор(?:\s+(?:слов|музыки))?|слова|музыка|аранжировка)\s*[:：]", re.I)
 
 
+def is_credit_or_marker(text: str) -> bool:
+    return bool(_MARKER.fullmatch(text) or _CREDIT.match(text))
+
+
 def is_non_sung(text: str) -> bool:
-    return is_common_marker(text) or bool(_MARKER.fullmatch(text) or _CREDIT.match(text))
+    return is_common_marker(text) or is_credit_or_marker(text)
 
 
 @lru_cache(maxsize=1)

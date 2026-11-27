@@ -92,12 +92,14 @@ def test_language_switch_and_ctc_retry_keep_correct_offset(tmp_path, monkeypatch
     assert offsets == [("zh", [100]), ("cant", [100])]
 
 
+@pytest.mark.parametrize("overrides", [{}, {"zh": -1.3, "cant": -1.2, "ru": -0.65}])
 @pytest.mark.parametrize(("texts", "language", "profile"), [
     (["春天", "冬天"], "zh", "mms_fa"),
     (["佢哋", "唔好"], "cant", "mms_fa"),
     (["hello", "world"], "ja-en", "nextfire"),
+    (["Я и you", "А я sing"], "ru", "mms_fa"),
 ])
-def test_auto_resolves_model_before_offset_verification(tmp_path, monkeypatch, texts, language, profile):
+def test_auto_resolves_model_before_offset_verification(tmp_path, monkeypatch, texts, language, profile, overrides):
     song = make_song(tmp_path, texts)
     (song / "stems").mkdir()
     (song / "stems/vocals.wav").touch()
@@ -105,13 +107,17 @@ def test_auto_resolves_model_before_offset_verification(tmp_path, monkeypatch, t
     mms.touch()
     paths = ModelPaths(ctc_model_path=tmp_path, mms_fa_model_path=mms)
     config = AlignmentConfig(language="auto", models=paths, offset_acoustic_verify=True,
-                             keep_vocals=True, vocals_format="wav")
+                             keep_vocals=True, vocals_format="wav", ctc_score_thresholds=overrides)
+    expected = overrides.get(language, -0.8 if language == "ru" else -2.25)
+    assert replace(config, language=language).ctc_score_threshold == expected
     seen = []
     def verify(audio, rows, estimate, config):
+        assert config.ctc_score_threshold == expected
         seen.append(config.models.ctc_model_path)
         return estimate
 
     def align(audio, rows, config, progress):
+        assert config.ctc_score_threshold == expected
         seen.append(config.models.ctc_model_path)
         return rows
 

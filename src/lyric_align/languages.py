@@ -68,6 +68,7 @@ class LanguageProfile:
     extra_non_sung: Callable[[str], bool] | None = None
     exact_surface_ranges: bool = False
     acoustic_model: str = "nextfire"
+    ctc_score_threshold: float = -2.25
 
     def filters(self, text: str) -> bool:
         return bool(g2p.NON_SUNG.search(text) or (self.extra_non_sung and self.extra_non_sung(text)))
@@ -83,5 +84,5 @@ LANGUAGES = {
     "zh": _chinese_profile("zh", "pypinyin"),
     "cant": _chinese_profile("cant", "ToJyutping"),
     "ru": LanguageProfile("uroman", _russian_reading, str.split, _surface_target, _span_annotation,
-                          russian.is_non_sung, exact_surface_ranges=True, acoustic_model="mms_fa"),
+                          russian.is_non_sung, exact_surface_ranges=True, acoustic_model="mms_fa", ctc_score_threshold=-0.8),
 }

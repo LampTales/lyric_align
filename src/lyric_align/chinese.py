@@ -23,8 +23,12 @@ _CREDIT = re.compile(rf"^[【（(\[]?\s*{_CREDIT_ROLE}(?:\s*[/／、&]\s*{_CREDI
 _MARKER = re.compile(r"^[【\[(（~\s]*(?:前奏|尾奏|間奏|间奏|纯音乐|純音樂)[】\])）~\s]*$")
 
 
+def is_credit_or_marker(text: str) -> bool:
+    return bool(_CREDIT.search(text) or _MARKER.fullmatch(text))
+
+
 def is_non_sung(text: str) -> bool:
-    return bool(_CREDIT.search(text) or _MARKER.fullmatch(text)) or not any(char.isalnum() for char in text)
+    return is_credit_or_marker(text) or not any(char.isalnum() for char in text)
 
 
 def _han_readings(text: str, language: str) -> list[str]:

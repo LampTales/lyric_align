@@ -41,7 +41,7 @@ def test_manual_russian_route_preserves_other_defaults(tmp_path):
     (tmp_path / "lyrics_timeline.json").write_text(json.dumps([
         dict(text=t, start_ms=i*2000, end_ms=(i+1)*2000) for i, t in enumerate(text)
     ]))
-    assert detect_language(tmp_path).language == "ja-en"
+    assert detect_language(tmp_path).language == "ru"
     config = AlignmentConfig(language="ru", enable_offset=False)
     assert AlignmentConfig().ctc_score_threshold == -2.25 and config.ctc_score_threshold == -0.8
     artifact = prepare_song(tmp_path, config=config)

@@ -40,7 +40,7 @@ not need to modify internal modules. The main controls are:
 
 | Area | Parameters |
 | --- | --- |
-| text | `g2p_backend` (`sudachi` by default for `language="ja-en"`), `language` (`ja-en`, `zh`, `cant`, manual `ru`, `auto`) |
+| text | `g2p_backend` (`sudachi` by default for `language="ja-en"`), `language` (`ja-en`, `zh`, `cant`, `ru`, `auto`) |
 | execution | `device`, `ffmpeg_path`, `sample_rate` |
 | Demucs/output | `demucs_model_name`, `keep_vocals`, `keep_instrumental`, `vocals_format`, `instrumental_format`, `vocals_bitrate`, `instrumental_bitrate` |
 | offset | `enable_offset`, `offset_low_ms`, `offset_high_ms`, `offset_step_ms` |
@@ -89,6 +89,12 @@ conversion.
 - `stages`: per-stage status and diagnostics;
 - `models`: the independently supplied resource paths/provenance;
 - `artifacts`: relative stem and preprocessing paths, or `null` when absent.
+
+After routing, the language profile supplies the acoustic model and default score threshold
+(`-0.8` for Russian, `-2.25` for Japanese/English, Mandarin and Cantonese).
+Use `ctc_score_threshold` for a common override or `ctc_score_thresholds={"ru": -0.65}`
+for a per-language override. Per-language values take priority. Automatic and explicit
+language selection use the same settings.
 
 The Japanese/English path uses NextFire. Mandarin and Cantonese use MMS_FA with pinyin or Jyutping. Both checkpoints accept lowercase Latin labels: Japanese readings are romanized, Latin words retain their
 surface spelling, and punctuation or spaces are omitted from the acoustic

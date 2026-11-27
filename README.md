@@ -109,7 +109,7 @@ MMS_FA weight **file** with `--ctc-model-path /models/torch/hub/checkpoints/mode
 The Russian profile uses uroman with the `rus` language rules, retains English
 spelling, and maps the resulting Latin labels back to the original glyphs.
 The initial Russian score threshold is `-0.8`; use `--ctc-score-threshold` to override.
-Russian is available through manual selection.
+Automatic routing also selects Russian for qualifying Cyrillic lyrics, including Russian/English songs.
 
 Preview automatic routing with `lyric-align detect --song-dir /data/song`.
 Use `--language auto` on the prepare command to apply the decision. The

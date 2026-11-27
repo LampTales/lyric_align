@@ -21,7 +21,16 @@ def timeline(path, texts, **extra):
     ([], "ja-en", "no_sung_text"),
     (["纯音乐，请欣赏", "作曲：秋"], "ja-en", "no_sung_text"),
     (["贝贝"], "zh", "insufficient_text"),
-    (["Ветер", "Иди ко мне"], "ja-en", "unsupported_script"),
+    (["Ветер", "Иди ко мне"], "ru", "russian_script"),
+    (["Я и you", "А я sing", "one", "two", "three", "four"], "ru", "russian_script"),
+    (["Я и you", "А я sing", "one", "two", "three", "four", "five"], "ja-en", "latin_spelling"),
+    (["hеllo summеr", "hеаrtbeat", "Музыка: Ветер", "[Припев]"], "ja-en", "latin_spelling"),
+    (["Я и you"] * 5 + ["English"], "ja-en", "latin_spelling"),
+    (["Ветер", "А я", "春天", "秋天"], "zh", "han_default"),
+    (["Ветер 春天", "А я 秋天", "Моя песня"], "ru", "russian_script"),
+    (["春風舞う", "秋風渡る", "夏空", "冬雪", "朝日", "夕映"], "ja-en", "kana"),
+    (["春風舞う", "秋風渡る", "夏空", "冬雪", "朝日", "夕映", "夜空"], "zh", "han_default"),
+    (["Моя пісня", "Твої слова", "Ветер"], "ja-en", "unsupported_script"),
 ])
 def test_cli_reads_only_sung_originals(tmp_path, texts, language, reason, capsys):
     timeline(tmp_path, texts, translation="ねこがいる")
@@ -30,6 +39,16 @@ def test_cli_reads_only_sung_originals(tmp_path, texts, language, reason, capsys
     assert (decision["language"], decision["reason"]) == (language, reason)
     assert decision["fallback"] == (reason in {"no_sung_text", "insufficient_text", "unsupported_script"})
     assert [p.name for p in tmp_path.iterdir()] == ["lyrics_timeline.json"]
+
+
+def test_detection_is_independent_of_alignment_filters(tmp_path, monkeypatch):
+    from lyric_align.languages import LANGUAGES
+
+    timeline(tmp_path, ["风吹过", "雨落下", "Музыка: Иван", "[Припев]", "作词：甲"])
+    monkeypatch.setitem(LANGUAGES, "ru", replace(LANGUAGES["ru"], extra_non_sung=lambda text: True))
+    decision = detect_language(tmp_path)
+    assert decision.language == "zh"
+    assert decision.evidence["unique_lines"] == 2
 
 
 def test_auto_rechecks_optional_pronunciation_on_cache_hits(tmp_path):
